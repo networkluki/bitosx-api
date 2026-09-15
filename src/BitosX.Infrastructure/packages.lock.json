@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "bitosx.application": {
+        "type": "Project",
+        "dependencies": {
+          "BitosX.Contracts": "[0.1.0, )"
+        }
+      },
+      "bitosx.contracts": {
+        "type": "Project"
+      }
+    }
+  }
+}

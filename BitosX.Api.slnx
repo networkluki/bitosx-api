@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BitosX.Api/BitosX.Api.csproj" />
+    <Project Path="src/BitosX.Application/BitosX.Application.csproj" />
+    <Project Path="src/BitosX.Contracts/BitosX.Contracts.csproj" />
+    <Project Path="src/BitosX.Infrastructure/BitosX.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BitosX.Api.Tests/BitosX.Api.Tests.csproj" />
+    <Project Path="tests/BitosX.Application.Tests/BitosX.Application.Tests.csproj" />
+  </Folder>
+</Solution>

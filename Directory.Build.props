@@ -1,0 +1,32 @@
+<Project>
+
+  <!--
+    Solution-wide build defaults for the BitosX API foundation.
+    Keep this minimal: shared language/runtime settings and product version
+    metadata that the /version endpoint reads from assembly attributes.
+  -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <!-- Deterministic dependency locking for this security-sensitive API. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+  <!-- Product / build version metadata (read at runtime for /version). -->
+  <PropertyGroup>
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <Product>BitosX API</Product>
+    <Company>BitosX</Company>
+    <Authors>BitosX</Authors>
+    <!--
+      Keep InformationalVersion free of the trailing "+<commit>" build metadata
+      so the public /version response stays clean and deterministic. The
+      version provider still normalizes defensively.
+    -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+</Project>

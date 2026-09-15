@@ -1,0 +1,64 @@
+# ---- .NET build output ----
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+artifacts/
+*.user
+*.suo
+project.lock.json
+project.fragment.lock.json
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+
+# ---- Test / coverage output ----
+[Tt]est[Rr]esult*/
+coverage*
+*.coverage
+*.coveragexml
+*.trx
+TestResults/
+
+# ---- NuGet ----
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# ---- IDE / editor ----
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ---- Temporary files ----
+*.tmp
+*.log
+*.pid
+*.bak
+
+# ---- Secrets / environment (NEVER commit) ----
+.env
+.env.*
+*.env
+appsettings.*.local.json
+appsettings.Local.json
+secrets.json
+*.secret
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+*.der
+*.jks
+*.keystore
+
+# ---- Local user-specific settings ----
+launchSettings.local.json
+*.local.json

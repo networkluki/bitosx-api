@@ -1,0 +1,11 @@
+@BitosX.Api_HostAddress = http://127.0.0.1:5080
+
+### Liveness
+GET {{BitosX.Api_HostAddress}}/health
+Accept: application/json
+
+### Product/build version
+GET {{BitosX.Api_HostAddress}}/version
+Accept: application/json
+
+###
