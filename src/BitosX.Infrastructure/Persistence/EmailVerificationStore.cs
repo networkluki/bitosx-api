@@ -31,7 +31,8 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
               AND c.invalidated_at IS NULL
               AND c.expires_at > @nowUtc
               AND a.email_verified_at IS NULL
-              AND a.password_hash IS NULL;
+              AND a.password_hash IS NULL
+              AND a.disabled_at IS NULL;
             """;
 
         return await connection.QuerySingleOrDefaultAsync<ActiveChallengeView>(
@@ -57,6 +58,7 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
                   AND c.expires_at > @nowUtc
                   AND a.email_verified_at IS NULL
                   AND a.password_hash IS NULL
+                  AND a.disabled_at IS NULL
                 FOR UPDATE;
                 """, new { verifierHash, nowUtc }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
@@ -70,7 +72,7 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
             """
             UPDATE accounts
             SET password_hash = @passwordHashPhc, email_verified_at = @nowUtc, updated_at = @nowUtc
-            WHERE id = @accountId AND email_verified_at IS NULL AND password_hash IS NULL;
+            WHERE id = @accountId AND email_verified_at IS NULL AND password_hash IS NULL AND disabled_at IS NULL;
             """,
             new { passwordHashPhc, nowUtc, accountId = row.AccountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
@@ -102,7 +104,7 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
         // Lock the account; only unverified accounts are eligible.
         var eligible = await connection.QuerySingleOrDefaultAsync<Guid?>(
             new CommandDefinition(
-                "SELECT id FROM accounts WHERE id = @accountId AND email_verified_at IS NULL FOR UPDATE;",
+                "SELECT id FROM accounts WHERE id = @accountId AND email_verified_at IS NULL AND password_hash IS NULL AND disabled_at IS NULL FOR UPDATE;",
                 new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         if (eligible is null)

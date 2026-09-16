@@ -107,8 +107,8 @@ public sealed class EmailVerificationService : IEmailVerificationService
         var normalized = EmailNormalizer.Normalize(command.Email);
         var account = await _accounts.GetByNormalizedEmailAsync(normalized, cancellationToken).ConfigureAwait(false);
 
-        // Only unverified accounts are re-issued a challenge.
-        if (account is not null && account.EmailVerifiedAt is null)
+        // Only active, unverified accounts are re-issued a challenge (disabled accounts never).
+        if (account is not null && account.EmailVerifiedAt is null && account.DisabledAt is null)
         {
             var now = _clock.GetUtcNow().UtcDateTime;
             var prepared = _challengeFactory.Create(account.Id, account.Email, now);

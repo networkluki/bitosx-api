@@ -111,7 +111,8 @@ identifier and does not log headers or bodies.
   holds the emailed token at `POST /v1/auth/verify-email`. This eliminates
   pre-registration account takeover (an initiator can never set a victim's password).
   Future login invariant: an account is usable only if `email_verified_at IS NOT NULL
-  AND password_hash IS NOT NULL`.
+  AND password_hash IS NOT NULL AND disabled_at IS NULL`. Disabled accounts can neither
+  verify, receive a password, nor be sent resend emails.
 - **Account password:** Argon2id (`Konscious`), self-describing PHC storage, `p=1`.
   **Locked parameters (benchmarked on `bitosx-prod`, 1 vCPU / ~1 GiB):**
   `m = 19456 KiB (19 MiB), t = 3, p = 1, maxConcurrency = 1` (hard budget
