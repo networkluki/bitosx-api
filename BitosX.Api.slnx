@@ -8,5 +8,6 @@
   <Folder Name="/tests/">
     <Project Path="tests/BitosX.Api.Tests/BitosX.Api.Tests.csproj" />
     <Project Path="tests/BitosX.Application.Tests/BitosX.Application.Tests.csproj" />
+    <Project Path="tests/BitosX.Infrastructure.Tests/BitosX.Infrastructure.Tests.csproj" />
   </Folder>
 </Solution>

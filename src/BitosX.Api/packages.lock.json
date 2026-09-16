@@ -11,10 +11,20 @@
           "Microsoft.OpenApi": "[2.12.0, 3.0.0)"
         }
       },
+      "Dapper": {
+        "type": "Transitive",
+        "resolved": "2.1.86",
+        "contentHash": "v5wQfl9GfHhfTeFhorWTefa8c1Ev4HO8VF8i8wbSdZkq+P/az+1DTcqpkz8s9lMGyFf9kvoeJ+b2ABShW4cuIA=="
+      },
       "Microsoft.OpenApi": {
         "type": "Transitive",
         "resolved": "2.12.0",
         "contentHash": "0xB/be+f6qYOhvQPUrVsLrau+fkowYv6gt9RIkajMhwT7sZnqtcA797yW3bS5kgSje+AQW4xZgyLnW641YFioQ=="
+      },
+      "MySqlConnector": {
+        "type": "Transitive",
+        "resolved": "2.6.2",
+        "contentHash": "dlTc/tsBa42szdvpj4nrHvQVUb0gsMwR9HT6J0Zz2OSqfP0CdYlGw+qQPqCpbnO97idfvclSjKYtM6y5QaBQaQ=="
       },
       "bitosx.application": {
         "type": "Project",
@@ -29,7 +39,9 @@
         "type": "Project",
         "dependencies": {
           "BitosX.Application": "[0.1.0, )",
-          "BitosX.Contracts": "[0.1.0, )"
+          "BitosX.Contracts": "[0.1.0, )",
+          "Dapper": "[2.1.86, )",
+          "MySqlConnector": "[2.6.2, )"
         }
       }
     }

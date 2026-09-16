@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using BitosX.Api.Endpoints;
 using BitosX.Api.Http;
 using BitosX.Application.Versioning;
+using BitosX.Infrastructure.Persistence;
 using BitosX.Infrastructure.Versioning;
 using Microsoft.AspNetCore.HttpOverrides;
 
@@ -57,6 +58,18 @@ builder.WebHost.ConfigureKestrel(options =>
 // Product version is derived from this API assembly's build metadata.
 builder.Services.AddSingleton<IProductVersionProvider>(
     _ => new AssemblyProductVersionProvider(Assembly.GetExecutingAssembly()));
+
+// Persistence is wired only when a connection string is configured (from a
+// local secret store, never committed). It stays absent for the loopback
+// health/version foundation, and no auth/account behavior is exposed yet.
+var bitosxConnectionString = builder.Configuration.GetConnectionString("Bitosx");
+if (!string.IsNullOrWhiteSpace(bitosxConnectionString))
+{
+    // Runtime uses a DML-only account; the migrator (optional) uses a separate
+    // schema-management account. Neither credential is committed.
+    var bitosxMigratorConnectionString = builder.Configuration.GetConnectionString("BitosxMigrator");
+    builder.Services.AddBitosxPersistence(bitosxConnectionString, bitosxMigratorConnectionString);
+}
 
 var app = builder.Build();
 
