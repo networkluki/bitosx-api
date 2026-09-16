@@ -67,12 +67,14 @@ public sealed class DatabaseFixture : IAsyncLifetime
         await ResetAsync();
     }
 
-    /// <summary>Removes all account rows (children cascade) so tests start clean.</summary>
+    /// <summary>Removes account rows (challenge/session children cascade) and the
+    /// standalone email_outbox rows so tests start clean.</summary>
     public async Task ResetAsync()
     {
         await using var connection = await ConnectionFactory.OpenConnectionAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = "DELETE FROM accounts;";
+        // email_outbox has no FK to accounts, so clear it explicitly.
+        command.CommandText = "DELETE FROM email_outbox; DELETE FROM accounts;";
         await command.ExecuteNonQueryAsync();
     }
 
