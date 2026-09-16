@@ -112,9 +112,23 @@ identifier and does not log headers or bodies.
   pre-registration account takeover (an initiator can never set a victim's password).
   Future login invariant: an account is usable only if `email_verified_at IS NOT NULL
   AND password_hash IS NOT NULL`.
-- **Account password:** Argon2id (`Konscious`), self-describing PHC storage, `p=1`,
-  candidate `m=46 MiB, t=3` (final `(m,t,maxConcurrency)` locked by the on-box
-  benchmark; hard budget `memoryKiB × maxConcurrency ≤ 192 MiB`). The PHC parser
+- **Account password:** Argon2id (`Konscious`), self-describing PHC storage, `p=1`.
+  **Locked parameters (benchmarked on `bitosx-prod`, 1 vCPU / ~1 GiB):**
+  `m = 19456 KiB (19 MiB), t = 3, p = 1, maxConcurrency = 1` (hard budget
+  `memoryKiB × maxConcurrency ≤ 192 MiB`). Benchmark evidence (`tools/BitosX.Benchmarks`,
+  Release):
+
+  | cap | single (ms) | p50 (ms) | p95 (ms) | throughput (h/s) | peak WS (MiB) |
+  |----:|------------:|---------:|---------:|-----------------:|--------------:|
+  | 1 | ~200–430 | ~2030 | ~8069 | ~2.1 | ~104 |
+  | 2 | ~198 | ~1823 | ~5024 | ~4.3 | ~168 |
+  | 3 | ~191 | ~4038 | ~6572 | ~3.6 | ~344 |
+
+  On a single vCPU, memory-hard hashes cannot truly run in parallel; higher caps only
+  queue and inflate memory/latency. **cap=1** was chosen for the lowest memory footprint
+  (~104 MiB incl. runtime) and predictable latency; concurrent bursts are additionally
+  bounded by rate limiting (a production blocker). Single-hash latency (~0.2–0.4 s) is
+  acceptable for a rate-limited, once-per-verification cost. The PHC parser
   rejects out-of-budget/hostile parameters (`MaxVerifyMemoryKiB` = `floor(192 MiB /
   concurrency)`, `MaxVerifyIterations ≈ 2× active`, `p=1` only) **before** any Argon2
   allocation/execution. Verification is two-phase: a non-locking pre-check (no hashing

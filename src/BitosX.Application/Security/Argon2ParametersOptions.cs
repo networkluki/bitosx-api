@@ -15,10 +15,11 @@ public sealed class Argon2ParametersOptions
     /// <summary>Absolute floor for accepted memory (8 MiB).</summary>
     public const int AbsoluteMinMemoryKiB = 8 * 1024;
 
-    public int MemoryKiB { get; set; } = 47104; // 46 MiB candidate
+    // Benchmark-locked on bitosx-prod (1 vCPU / ~1 GiB): see SECURITY_MODEL.md.
+    public int MemoryKiB { get; set; } = 19456; // 19 MiB
     public int Iterations { get; set; } = 3;
-    public int Lanes { get; set; } = 1;         // p = 1 fixed for 1 vCPU
-    public int MaxConcurrency { get; set; } = 2; // conservative default; benchmark-locked
+    public int Lanes { get; set; } = 1;          // p = 1 fixed for 1 vCPU
+    public int MaxConcurrency { get; set; } = 1; // cap=1: lowest memory + predictable latency
 
     /// <summary>Override for the max memory (KiB) accepted at verification; null = budget-derived.</summary>
     public int? MaxVerifyMemoryKiB { get; set; }
