@@ -42,12 +42,14 @@ internal sealed class FakeVerificationStore : IEmailVerificationStore
     public ResendOutcome ReplaceOutcome { get; set; } = ResendOutcome.Replaced;
     public int FinalizeCalls { get; private set; }
     public int ReplaceCalls { get; private set; }
+    public DateTime PrecheckNow { get; private set; }
+    public DateTime FinalizeNow { get; private set; }
 
     public Task<ActiveChallengeView?> FindActiveChallengeByVerifierAsync(byte[] v, DateTime now, CancellationToken ct = default)
-        => Task.FromResult(ActiveToReturn);
+    { PrecheckNow = now; return Task.FromResult(ActiveToReturn); }
 
     public Task<VerificationOutcome> FinalizeVerificationAsync(byte[] v, string phc, DateTime now, CancellationToken ct = default)
-    { FinalizeCalls++; return Task.FromResult(FinalizeOutcome); }
+    { FinalizeCalls++; FinalizeNow = now; return Task.FromResult(FinalizeOutcome); }
 
     public Task<ResendOutcome> ReplaceActiveChallengeAsync(Guid a, EmailVerificationChallenge c, EmailOutboxMessage o, DateTime now, TimeSpan min, CancellationToken ct = default)
     { ReplaceCalls++; return Task.FromResult(ReplaceOutcome); }
@@ -58,6 +60,18 @@ internal sealed class SpyPasswordHasher : IAccountPasswordHasher
 {
     public int HashCalls { get; private set; }
     public string Hash(string password) { HashCalls++; return "$argon2id$v=19$m=8192,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ"; }
+    public PasswordVerificationResult Verify(string password, string encoded) => PasswordVerificationResult.Success;
+}
+
+/// <summary>Hasher that advances a fake clock during Hash to simulate Argon2 duration.</summary>
+internal sealed class AdvancingHasher : IAccountPasswordHasher
+{
+    private readonly Microsoft.Extensions.Time.Testing.FakeTimeProvider _clock;
+    private readonly TimeSpan _advance;
+    public AdvancingHasher(Microsoft.Extensions.Time.Testing.FakeTimeProvider clock, TimeSpan advance)
+    { _clock = clock; _advance = advance; }
+
+    public string Hash(string password) { _clock.Advance(_advance); return "$argon2id$v=19$m=8192,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ"; }
     public PasswordVerificationResult Verify(string password, string encoded) => PasswordVerificationResult.Success;
 }
 
