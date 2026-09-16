@@ -9,6 +9,7 @@ namespace BitosX.Infrastructure.Persistence;
 public sealed class EmailVerificationStore : IEmailVerificationStore
 {
     private sealed record FinalizeRow(Guid Id, Guid AccountId);
+    private sealed record ActiveOutboxRow(DateTime ChallengeCreatedAt, DateTime? SentAt, DateTime? FailedAt, DateTime? LockedUntil);
 
     private readonly BitosxConnectionFactory _connectionFactory;
 
@@ -113,18 +114,39 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
             return ResendOutcome.AccountNotEligible;
         }
 
-        // Min re-issue interval: reject if the newest active challenge is too young.
-        var newestActiveCreatedAt = await connection.QuerySingleOrDefaultAsync<DateTime?>(
+        // Locate + lock the current active challenge and its pending outbox row. The
+        // FOR UPDATE on email_outbox coordinates with the dispatcher's ClaimDueAsync
+        // (which uses FOR UPDATE SKIP LOCKED): if a delivery is in flight we see its
+        // lease; if we lock first the dispatcher skips the row.
+        var active = await connection.QuerySingleOrDefaultAsync<ActiveOutboxRow>(
             new CommandDefinition(
                 """
-                SELECT MAX(created_at) FROM email_verification_challenges
-                WHERE account_id = @accountId AND consumed_at IS NULL AND invalidated_at IS NULL AND expires_at > @nowUtc;
+                SELECT c.created_at AS ChallengeCreatedAt, o.sent_at AS SentAt,
+                       o.failed_at AS FailedAt, o.locked_until AS LockedUntil
+                FROM email_verification_challenges c
+                JOIN email_outbox o ON o.challenge_id = c.id
+                WHERE c.account_id = @accountId
+                  AND c.consumed_at IS NULL AND c.invalidated_at IS NULL AND c.expires_at > @nowUtc
+                ORDER BY c.created_at DESC
+                LIMIT 1
+                FOR UPDATE;
                 """, new { accountId, nowUtc }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
-        if (newestActiveCreatedAt is { } created && (nowUtc - created) < minReissueInterval)
+        if (active is not null)
         {
-            await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
-            return ResendOutcome.SkippedTooSoon;
+            // Delivery currently in progress (leased, not yet terminal): do not invalidate.
+            if (active.SentAt is null && active.FailedAt is null && active.LockedUntil is { } lease && lease > nowUtc)
+            {
+                await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                return ResendOutcome.SkippedDeliveryInProgress;
+            }
+
+            // Min re-issue interval: reject if the newest active challenge is too young.
+            if ((nowUtc - active.ChallengeCreatedAt) < minReissueInterval)
+            {
+                await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                return ResendOutcome.SkippedTooSoon;
+            }
         }
 
         await connection.ExecuteAsync(new CommandDefinition(

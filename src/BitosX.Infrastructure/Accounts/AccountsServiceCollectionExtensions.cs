@@ -53,6 +53,10 @@ public static class AccountsServiceCollectionExtensions
         var outbox = new EmailOutboxOptions();
         configuration.GetSection("Email:Outbox").Bind(outbox);
 
+        // Fail closed if the SMTP attempt timeout could outlive the outbox lease:
+        // a delivery must never run past its lease (which is the resend-coordination signal).
+        ValidateDeliveryTimeouts(outbox, smtp);
+
         var connectionFactory = new BitosxConnectionFactory(runtimeConnectionString);
 
         services.AddSingleton(argon2);
@@ -95,6 +99,23 @@ public static class AccountsServiceCollectionExtensions
         services.AddHostedService<EmailOutboxBackgroundService>();
 
         return services;
+    }
+
+    /// <summary>Safety margin required between the SMTP attempt timeout and the outbox lease.</summary>
+    public static readonly TimeSpan DeliveryTimeoutSafetyMargin = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Enforces LeaseDuration &gt; SmtpTimeout + margin so a bounded SMTP attempt always
+    /// completes within its lease. Throws (fail closed) when violated.
+    /// </summary>
+    public static void ValidateDeliveryTimeouts(EmailOutboxOptions outbox, SmtpOptions smtp)
+    {
+        if (outbox.LeaseDuration <= smtp.Timeout + DeliveryTimeoutSafetyMargin)
+        {
+            throw new InvalidOperationException(
+                $"Email outbox LeaseDuration ({outbox.LeaseDuration}) must exceed SMTP timeout " +
+                $"({smtp.Timeout}) plus a {DeliveryTimeoutSafetyMargin} safety margin.");
+        }
     }
 
     private static void TryAddSingletonTimeProvider(this IServiceCollection services)

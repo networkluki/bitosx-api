@@ -140,6 +140,19 @@ identifier and does not log headers or bodies.
   `HMAC-SHA256(EmailVerificationPepper, token)` — never the plaintext token. TTL 30
   minutes, single use; `consumed_at` (verified) is distinct from `invalidated_at`
   (replaced by resend).
+- **Delivery is at-least-once** (never claimed exactly-once). Three layers keep an
+  invalidated/expired challenge's email from being sent: (1) **lease + resend
+  coordination** — resend locks the active challenge's outbox row (coordinating with the
+  dispatcher's `FOR UPDATE SKIP LOCKED` claim) and, if the row is currently leased for a
+  bounded in-flight SMTP attempt, does **not** invalidate it (`SkippedDeliveryInProgress`,
+  still a generic 202); (2) a **fresh per-row eligibility re-check** immediately before
+  send; (3) the **verify endpoint** independently rejects consumed/invalidated/expired
+  tokens. A bounded SMTP attempt timeout is enforced to always be shorter than the outbox
+  lease (`LeaseDuration > SmtpTimeout + margin`, validated fail-closed at startup), so a
+  delivery never outlives its lease. Verification state remains authoritative regardless
+  of unusual SMTP behavior; a Gmail/provider-level **duplicate** may still occur in the
+  documented accept-before-crash window (a duplicate re-sends the same single link and
+  never creates a second valid challenge).
 - **Transactional outbox (no synchronous SMTP in the request path** — removes the
   network-latency enumeration oracle). The verification token lives transiently in the
   outbox only as **AES-256-GCM ciphertext** under an independent `EmailOutboxKey`,

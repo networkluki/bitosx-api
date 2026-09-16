@@ -17,6 +17,9 @@ public enum ResendOutcome
     Replaced,
     SkippedTooSoon,
     AccountNotEligible,
+
+    /// <summary>The active challenge's email is currently leased by a dispatcher (in-flight); not invalidated.</summary>
+    SkippedDeliveryInProgress,
 }
 
 /// <summary>

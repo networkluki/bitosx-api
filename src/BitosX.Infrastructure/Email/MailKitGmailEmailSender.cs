@@ -49,7 +49,7 @@ public sealed class MailKitGmailEmailSender : IEmailSender
     {
         try
         {
-            using var client = new SmtpClient();
+            using var client = new SmtpClient { Timeout = (int)_smtp.Timeout.TotalMilliseconds };
             await client.ConnectAsync(_smtp.Host, _smtp.Port, SocketOptions, cancellationToken).ConfigureAwait(false);
             await client.AuthenticateAsync(_smtp.Username, _smtp.AppPassword, cancellationToken).ConfigureAwait(false);
             await client.SendAsync(BuildMessage(message), cancellationToken).ConfigureAwait(false);
