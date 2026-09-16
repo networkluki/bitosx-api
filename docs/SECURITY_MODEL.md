@@ -86,6 +86,24 @@ identifier and does not log headers or bodies.
 - OpenAPI is currently served on loopback; it must be gated/reviewed before any
   public exposure.
 
+## Database security (Persistence Foundation)
+
+- MariaDB listens on **`127.0.0.1:3306` only** (verified with `ss`); it is not
+  publicly reachable. The default bind-address was not modified.
+- Dedicated least-privilege user `bitosx_app`@`127.0.0.1`, granted only on
+  `bitosx.*` and the test schema `bitosx_test.*` — never `root`, never a legacy/
+  vault user, never global data privileges.
+- **All account secrets are stored only as hashes**, never plaintext:
+  `password_hash` (future account password, separate from the vault master
+  password), `token_hash` (email/refresh tokens, SHA-256), `code_hash` (phone
+  OTP, HMAC-SHA256 with a server pepper not stored in the row). There is no
+  plaintext password, token, or OTP column anywhere.
+- No vault master password, Vault Key, vault secret, or vault TOTP column exists
+  in any table (zero-knowledge boundary preserved at the schema level).
+- Credentials are supplied from local user-secrets and are never committed (not
+  in `appsettings*.json`, source, docs, or tests). Production secret injection
+  is designed separately. See [`PERSISTENCE.md`](PERSISTENCE.md).
+
 ## Known incomplete security work (must precede public account/auth go-live)
 
 These are acceptable to defer for **local** development, but public account/auth
@@ -96,7 +114,8 @@ production go-live **must be blocked** until they are completed and verified:
 - Cloudflare-only origin protection,
 - Apache reverse proxy to Kestrel (with reviewed real-client-IP handling),
 - production `systemd` service,
-- MariaDB provisioning (isolated `bitosx` database + least-privilege user),
+- production DB secret injection, backups, and (recommended) a separate
+  migrator vs. runtime DB user (local `bitosx` DB + least-privilege user is done),
 - the account/auth implementation itself (hashing, tokens, sessions, etc.).
 
 **A working API foundation does not make this server production-ready.**

@@ -71,14 +71,21 @@ Cloudflare
   (e.g. `/v1/auth/...`, `/v1/account/...`). The `/v1` route group exists as a
   seam (`ApiV1Endpoints.MapApiV1`) but has no endpoints yet.
 
-## Future persistence boundary
+## Persistence boundary
 
-Persistence is **not** implemented in this milestone. When added:
+The Persistence Foundation is in place (schema + data access only; no
+account/auth behavior yet). Details in [`PERSISTENCE.md`](PERSISTENCE.md).
 
-- The engine will be **MariaDB**, in an isolated `bitosx` database/schema.
+- Engine: **MariaDB 11.8**, isolated `bitosx` database (tests use `bitosx_test`),
+  loopback-only (`127.0.0.1:3306`).
+- Data access: **MySqlConnector + Dapper + versioned SQL migrations** (not EF
+  Core — no stable EF Core 10 MariaDB provider exists; see `PERSISTENCE.md`).
 - Persistence adapters live in `BitosX.Infrastructure` behind interfaces defined
-  in `BitosX.Application`.
-- The API layer never talks to a database directly; it depends on application
-  interfaces only.
-
-No database, EF migrations, connection strings, or account tables exist yet.
+  in `BitosX.Application` (`IAccountRepository`, `IDatabaseMigrator`). The API
+  layer never talks to the database driver directly; it depends on application
+  abstractions and composes them at the root.
+- Domain models (`Account`, `Session`, `RefreshToken`, verification challenges)
+  live in `BitosX.Application`; EF/DB entities are never exposed through
+  `BitosX.Contracts`.
+- Connection strings/credentials are supplied from local user-secrets and are
+  never committed.
