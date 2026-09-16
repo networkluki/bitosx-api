@@ -12,4 +12,7 @@ public sealed class EmailVerificationSecurityOptions
 
     /// <summary>Token time-to-live; policy default is 30 minutes.</summary>
     public TimeSpan TokenLifetime { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>Minimum interval between resend re-issues for one account (anti-mail-bomb stopgap).</summary>
+    public TimeSpan MinResendInterval { get; set; } = TimeSpan.FromSeconds(60);
 }
