@@ -12,6 +12,7 @@ public sealed record OutboxDueRow(
     string MessageType,
     string RecipientEmail,
     ProtectedOutboxPayload Payload,
+    int AttemptCount,
     DateTime? ChallengeConsumedAt,
     DateTime? ChallengeInvalidatedAt,
     DateTime ChallengeExpiresAt);

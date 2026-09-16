@@ -15,7 +15,7 @@ public sealed class EmailOutboxStore : IEmailOutboxStore
     private sealed record DueRowRaw(
         Guid Id, Guid ChallengeId, string MessageType, string RecipientEmail,
         byte PayloadVersion, byte[] PayloadNonce, byte[] PayloadCiphertext, byte[] PayloadTag,
-        DateTime? ChallengeConsumedAt, DateTime? ChallengeInvalidatedAt, DateTime ChallengeExpiresAt);
+        int AttemptCount, DateTime? ChallengeConsumedAt, DateTime? ChallengeInvalidatedAt, DateTime ChallengeExpiresAt);
 
     public async Task<IReadOnlyList<OutboxDueRow>> ClaimDueAsync(
         DateTime nowUtc, DateTime leaseUntil, string workerId, int batchSize, CancellationToken cancellationToken = default)
@@ -48,6 +48,7 @@ public sealed class EmailOutboxStore : IEmailOutboxStore
             SELECT o.id AS Id, o.challenge_id AS ChallengeId, o.message_type AS MessageType,
                    o.recipient_email AS RecipientEmail, o.payload_version AS PayloadVersion,
                    o.payload_nonce AS PayloadNonce, o.payload_ciphertext AS PayloadCiphertext, o.payload_tag AS PayloadTag,
+                   o.attempt_count AS AttemptCount,
                    c.consumed_at AS ChallengeConsumedAt, c.invalidated_at AS ChallengeInvalidatedAt, c.expires_at AS ChallengeExpiresAt
             FROM email_outbox o
             JOIN email_verification_challenges c ON c.id = o.challenge_id
@@ -59,7 +60,7 @@ public sealed class EmailOutboxStore : IEmailOutboxStore
         return raws.Select(r => new OutboxDueRow(
             r.Id, r.ChallengeId, r.MessageType, r.RecipientEmail,
             new ProtectedOutboxPayload(r.PayloadVersion, r.PayloadNonce, r.PayloadCiphertext, r.PayloadTag),
-            r.ChallengeConsumedAt, r.ChallengeInvalidatedAt, r.ChallengeExpiresAt)).ToList();
+            r.AttemptCount, r.ChallengeConsumedAt, r.ChallengeInvalidatedAt, r.ChallengeExpiresAt)).ToList();
     }
 
     public Task MarkSentAndErasePayloadAsync(Guid id, DateTime nowUtc, CancellationToken cancellationToken = default)
