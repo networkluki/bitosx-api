@@ -89,3 +89,22 @@ account/auth behavior yet). Details in [`PERSISTENCE.md`](PERSISTENCE.md).
   `BitosX.Contracts`.
 - Connection strings/credentials are supplied from local user-secrets and are
   never committed.
+
+## Account subsystem (registration + email verification)
+
+- **Application** defines the use-case services (`AccountRegistrationService`,
+  `EmailVerificationService`), the password/token/outbox abstractions
+  (`IAccountPasswordHasher`, `IEmailVerificationTokenFactory`,
+  `IOutboxPayloadProtector`, `IEmailSender`, `IVerificationEmailComposer`,
+  `IVerificationChallengeFactory`), and the persistence intents
+  (`IAccountRegistrationStore`, `IEmailVerificationStore`, `IEmailOutboxStore`).
+- **Infrastructure** implements them: `Argon2idPasswordHasher` (+ hardened PHC codec),
+  `HmacEmailVerificationTokenFactory`, `AesGcmOutboxPayloadProtector`,
+  `MailKitGmailEmailSender`, the transactional stores, and the
+  `EmailOutboxBackgroundService` (in-process dispatcher — no separate worker).
+  Wired by `AddBitosxAccounts` (gated on configured secrets).
+- **Contracts** exposes only DTOs (`RegisterRequest`, `VerifyEmailRequest`,
+  `ResendVerificationRequest`, `AcceptedResponse`) — no password/token/hash fields.
+- **API** maps `/v1/auth/{register,verify-email,resend-verification}`.
+- Delivery is decoupled from the request via a transactional outbox; SMTP never runs
+  in the HTTP request path. See `SECURITY_MODEL.md` and `PERSISTENCE.md`.

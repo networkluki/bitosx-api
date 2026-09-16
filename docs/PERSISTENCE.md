@@ -77,6 +77,24 @@ All account secrets are stored **only as hashes**, never plaintext:
 `code_hash` (phone OTP). The account password is separate from the vault master
 password. See [`SECURITY_MODEL.md`](SECURITY_MODEL.md).
 
+## Migration 0002 (account registration + email verification)
+
+`0002_account_registration_email_verification.sql` adds:
+- `email_verification_challenges.invalidated_at DATETIME(6) NULL` — distinct from
+  `consumed_at`. Active challenge := `consumed_at IS NULL AND invalidated_at IS NULL
+  AND expires_at > now`. Verify sets `consumed_at`; resend sets `invalidated_at`.
+- `UNIQUE INDEX ux_evc_token_hash` on `email_verification_challenges(token_hash)`
+  (lookup by verifier + collision safety). Note: `token_hash` holds
+  `HMAC-SHA256(pepper, token)` (0001's "SHA-256" comment is superseded; 0001 unchanged).
+- `email_outbox` table: durable, encrypted email queue. Columns include `challenge_id`
+  (FK → challenge, `ON DELETE CASCADE`), `recipient_email`, `payload_version`,
+  `payload_nonce`/`payload_ciphertext`/`payload_tag` (AES-256-GCM; zeroed on terminal
+  state), retry/lease columns (`available_at`, `attempt_count`, `locked_until`,
+  `locked_by`), and `sent_at`/`failed_at`. Index `ix_outbox_due`.
+
+`accounts` is unchanged: `password_hash VARCHAR(255)` is set (from NULL) at verification.
+The runtime account performs only DML on these tables; the migrator applies `0002`.
+
 ## Migration procedure
 
 1. Author the next script as `NNNN_description.sql` under

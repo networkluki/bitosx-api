@@ -104,6 +104,51 @@ identifier and does not log headers or bodies.
   in `appsettings*.json`, source, docs, or tests). Production secret injection
   is designed separately. See [`PERSISTENCE.md`](PERSISTENCE.md).
 
+## Account registration + email verification
+
+- **Email-first registration.** `POST /v1/auth/register` accepts only an email; the
+  account is created with `password_hash = NULL`. The password is chosen by whoever
+  holds the emailed token at `POST /v1/auth/verify-email`. This eliminates
+  pre-registration account takeover (an initiator can never set a victim's password).
+  Future login invariant: an account is usable only if `email_verified_at IS NOT NULL
+  AND password_hash IS NOT NULL`.
+- **Account password:** Argon2id (`Konscious`), self-describing PHC storage, `p=1`,
+  candidate `m=46 MiB, t=3` (final `(m,t,maxConcurrency)` locked by the on-box
+  benchmark; hard budget `memoryKiB × maxConcurrency ≤ 192 MiB`). The PHC parser
+  rejects out-of-budget/hostile parameters (`MaxVerifyMemoryKiB` = `floor(192 MiB /
+  concurrency)`, `MaxVerifyIterations ≈ 2× active`, `p=1` only) **before** any Argon2
+  allocation/execution. Verification is two-phase: a non-locking pre-check (no hashing
+  for bogus/expired/consumed/invalidated tokens), then hashing with no DB lock held,
+  then a short `FOR UPDATE` transaction that re-checks and applies conditional updates
+  (no partial activation).
+- **Verification token:** 256-bit random; the challenge table stores only
+  `HMAC-SHA256(EmailVerificationPepper, token)` — never the plaintext token. TTL 30
+  minutes, single use; `consumed_at` (verified) is distinct from `invalidated_at`
+  (replaced by resend).
+- **Transactional outbox (no synchronous SMTP in the request path** — removes the
+  network-latency enumeration oracle). The verification token lives transiently in the
+  outbox only as **AES-256-GCM ciphertext** under an independent `EmailOutboxKey`,
+  with AAD binding `id + version + message_type + recipient_email` (canonical
+  length-prefixed). The dispatcher checks the challenge is still active and verifies
+  recipient integrity **before** sending, never sends after expiry/invalidation, uses
+  bounded retries within the token TTL, and erases the encrypted payload on terminal
+  state. Live encrypted token payloads persist ≤ 24 h; sanitized metadata ≤ 7 days.
+- **Secrets** (`Security:EmailVerificationPepper`, `Security:EmailOutboxKey`,
+  `Email:SmtpAppPassword`) live only in user-secrets / production injection — never in
+  Git, DB, appsettings, or logs. Mutually independent and independent of vault crypto.
+  `EmailOutboxKey` rotation is drain-then-rotate (do not rotate with undrained rows).
+- **SMTP:** Gmail `smtp.gmail.com:587` STARTTLS, TLS validation on, no bypass; failures
+  isolated (never surfaced to clients). Automated tests never send real Gmail.
+- **Anti-enumeration:** register/resend return a single generic 202; verify returns
+  generic failures. Timing resistance is **best-effort** (SMTP off the request path;
+  no dummy hashing in register) — mandatory rate limiting precedes public exposure.
+
+## Rate limiting (production blocker for account endpoints)
+Per-IP + per-email limits on `/register`, stricter limits + min-interval + daily cap on
+`/resend-verification`, per-IP + backoff on `/verify-email`, a global outbound-email
+budget/circuit-breaker, the Argon2 concurrency cap (present), and adaptive
+Turnstile/CAPTCHA must all be in place before any public exposure.
+
 ## Known incomplete security work (must precede public account/auth go-live)
 
 These are acceptable to defer for **local** development, but public account/auth
