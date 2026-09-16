@@ -67,12 +67,14 @@ Contracts (`BitosX.Contracts`): `RegisterRequest { string Email }`; `VerifyEmail
 - **Algorithm:** exactly `argon2id`. **Version:** exactly `19` (0x13).
 - **Max encoded PHC length:** 512 chars (our strings are ~110; generous but bounded).
 - **Salt:** decoded length 8–64 bytes. **Hash:** decoded length 16–64 bytes.
-- **Memory `m`:** 8 MiB ≤ m ≤ 1 GiB expressed in KiB (i.e. `8192 ≤ m ≤ 1048576`) — and additionally rejected if `m` exceeds the configured verification ceiling (`Argon2:MaxVerifyMemoryKiB`, default = 4× the current hashing `m`, capped at 1048576).
-- **Iterations `t`:** 1 ≤ t ≤ 16.
 - **Parallelism `p`:** exactly 1 (we only ever produce `p=1`; any other value → `InvalidHashFormat`).
+- **Memory `m` and iterations `t` are bounded by the SAME service memory budget as normal hashing — never near the whole ~1 GiB box.** The verification ceilings are explicit, configurable, and derived from the active hashing config:
+  - `MaxVerifyMemoryKiB` (config `Security:Argon2:MaxVerifyMemoryKiB`) **default = `floor(192 MiB / HashingMaxConcurrency)` in KiB**, and is **clamped so that `MaxVerifyMemoryKiB × HashingMaxConcurrency ≤ 192 MiB`** and **never below the active hashing `MemoryKiB`** (the currently configured hashing parameters must always verify). A PHC with `m > MaxVerifyMemoryKiB` (or `m < 8192` KiB / 8 MiB floor) → `InvalidHashFormat`.
+  - `MaxVerifyIterations` (config `Security:Argon2:MaxVerifyIterations`) **default ≈ 2× the active hashing `Iterations`** (and never below it); `t < 1` or `t > MaxVerifyIterations` → `InvalidHashFormat`. We do **not** accept `t=16` merely because it parses.
+  - Rationale: v1 need not accept hashes demanding more CPU/memory than the running service is configured to spend safely. A future parameter migration deliberately raises these ceilings together with server resources/config.
 - **Numeric parsing:** `uint`/`int` via `TryParse` with explicit range checks (no silent overflow); reject non-numeric, leading `+`, or oversized digit runs.
 - **Base64:** strict decode; malformed → `InvalidHashFormat`.
-Only after all fields pass do we allocate and run Argon2 to verify. This protects the (future) login path and any admin/verify path from a hostile stored hash.
+All bounds — including the budget-derived `m`/`t` ceilings — are checked **before any Argon2 allocation and before any Argon2 execution**. No high-cost operation occurs for a rejected value. This protects the (future) login/verify paths from a hostile stored hash acting as a CPU/memory amplifier.
 
 ### 4.4 Argon2 parameters — benchmarked concurrency
 Hardware: **1 vCPU, ~1 GB RAM.** Fixed `p=1`. `SemaphoreSlim(HashingMaxConcurrency)`. **Hard invariant:** `memoryKiB × HashingMaxConcurrency ≤ 192 MiB`. Candidate `m ≈ 46 MiB (47104 KiB), t=3, p=1`. The on-box benchmark measures `maxConcurrency ∈ {1,2,3}` (single-hash latency, p50/p95 under load, throughput, RSS, CPU saturation, queuing) and selects final values honoring the budget and avoiding pathological single-vCPU latency (1 or 2 likely preferred; measurements decide). Final `(m,t,p=1,maxConcurrency)` + evidence recorded in `SECURITY_MODEL.md` during implementation.
@@ -111,14 +113,25 @@ Non-authoritative: single `@`, non-empty local/domain, ≤320 chars, no whitespa
 
 Request: `{ "token": "...", "password": "<12..128>" }`.
 
-Flow:
-1. **Validate password bounds** (§5). Invalid → `400` ProblemDetails (generic-safe; this is input validation, not account state).
-2. **Compute verifier** = `HMAC-SHA256(pepper, tokenBytes)` (§7A).
-3. **Locate + lock** the challenge by `token_hash` (`SELECT … FOR UPDATE`), joined to its account.
-4. **Verify all:** challenge exists; `consumed_at IS NULL`; `invalidated_at IS NULL`; `expires_at > now` (server UTC); **account `email_verified_at IS NULL`** (not already verified). Any failure → generic `Invalid` (no distinction).
-5. **Hash the supplied password** (Argon2id, §4) — inside the request but after the lock is held only briefly; note Argon2 is CPU/memory-bound (~200–350 ms) and runs while the row is locked, so the lock is on a single challenge row (not global) and contention is per-token only. (Alternative considered: hash before locking to shorten lock hold; rejected because we must first confirm the challenge is valid/unconsumed to avoid hashing on every bogus token as a DoS amplifier. The `FOR UPDATE` is on one row; concurrent verifies of *different* tokens do not contend.)
-6. **In ONE transaction:** `UPDATE accounts SET password_hash=@phc, email_verified_at=@now, updated_at=@now WHERE id=@accountId AND email_verified_at IS NULL` (conditional guard; affected=1 required); `UPDATE email_verification_challenges SET consumed_at=@now WHERE id=@id AND consumed_at IS NULL AND invalidated_at IS NULL` (affected=1 required); commit. If either conditional update affects 0 rows (raced), roll back → generic `Invalid`; the account is not partially activated and the token is not marked consumed.
-7. Success → `200` generic.
+**Two-phase flow — Argon2 is NEVER run while a DB lock is held, and is NEVER run for a bogus/expired/consumed/invalidated token** (so password hashing cannot be abused as a CPU amplifier for arbitrary invalid tokens):
+
+**Phase A — cheap pre-check (no lock, no hashing):**
+1. Validate password bounds (§5). Invalid → `400` ProblemDetails (input validation, not account state; no hashing, no DB write).
+2. Compute verifier = `HMAC-SHA256(pepper, tokenBytes)` (§7A).
+3. **Non-locking read** of the challenge (by `token_hash`) + its account.
+4. Preliminary validate: challenge exists; `consumed_at IS NULL`; `invalidated_at IS NULL`; `expires_at > now`; account `email_verified_at IS NULL`. If invalid → generic `Invalid`. **No Argon2 is run.**
+
+**Phase B — expensive work (no lock):**
+5. Hash the supplied password with Argon2id (§4), behind the concurrency semaphore. No DB connection/transaction is held during this.
+
+**Phase C — authoritative transaction (short-lived lock):**
+6. Begin transaction; `SELECT … FOR UPDATE` the challenge + account.
+7. **Re-check all authoritative conditions** (they may have changed since Phase A): challenge still exists; `consumed_at IS NULL`; `invalidated_at IS NULL`; `expires_at > now`; account `email_verified_at IS NULL`; **account `password_hash IS NULL`**.
+8. Conditional updates: `UPDATE accounts SET password_hash=@phc, email_verified_at=@now, updated_at=@now WHERE id=@accountId AND email_verified_at IS NULL AND password_hash IS NULL` (affected=1 required); `UPDATE email_verification_challenges SET consumed_at=@now WHERE id=@id AND consumed_at IS NULL AND invalidated_at IS NULL` (affected=1 required).
+9. If either affects 0 rows (state changed between A and C — raced consume/invalidate/verify) → **roll back** → generic `Invalid`; account remains unverified, `password_hash` stays NULL, token not consumed, no partial activation. Otherwise commit.
+10. Success → `200` generic.
+
+Phase A is an optimization + DoS gate; **Phase C's re-check is authoritative.** Only the single challenge/account rows are locked, and only for the brief C window (no network/Argon2 inside it). The already-hashed PHC from Phase B is simply discarded if C fails.
 
 **The holder of the token chooses the password.** A victim clicking an unsolicited link cannot activate an attacker-known password (the attacker never supplied one). **Future login invariant (documented, login out of scope):** an account is usable for login only if `email_verified_at IS NOT NULL AND password_hash IS NOT NULL`.
 
@@ -225,7 +238,7 @@ Internal logs distinguish outcomes by correlation id + account id — never toke
 - **Abstraction:** `IEmailSender.SendAsync(EmailMessage, ct)`; Application never references MailKit types. `FakeEmailSender` for tests; **automated tests never send real Gmail**; a manual, opt-in, secret-backed, excluded-from-CI smoke test may exist.
 
 ### 13.1 Configuration (secret vs non-secret) — never committed/logged
-`Email:SmtpHost=smtp.gmail.com`, `Email:SmtpPort=587`, `Email:SmtpUsername`, `Email:FromAddress`, `Email:FromName`, `Email:PublicBaseUrl` (config; e.g. `https://vault.bitosx.se`), `Email:VerificationPath=/verify-email`; **SECRET:** `Email:SmtpAppPassword`, `Security:EmailVerificationPepper`, `Security:EmailOutboxKey` (random 256-bit, independent of pepper/password-hashing/vault). Non-secret: `Email:Outbox:{MaxAttempts=6,PollInterval,BatchSize,LeaseSeconds,BackoffBaseSeconds,RetentionDays=7,ExpiredCleanupInterval}`, `Security:Argon2:{MemoryKiB,Iterations,Lanes,MaxConcurrency,MaxVerifyMemoryKiB}`. No real Gmail credential is created/requested by this document.
+`Email:SmtpHost=smtp.gmail.com`, `Email:SmtpPort=587`, `Email:SmtpUsername`, `Email:FromAddress`, `Email:FromName`, `Email:PublicBaseUrl` (config; e.g. `https://vault.bitosx.se`), `Email:VerificationPath=/verify-email`; **SECRET:** `Email:SmtpAppPassword`, `Security:EmailVerificationPepper`, `Security:EmailOutboxKey` (random 256-bit, independent of pepper/password-hashing/vault). Non-secret: `Email:Outbox:{MaxAttempts=6,PollInterval,BatchSize,LeaseSeconds,BackoffBaseSeconds,RetentionDays=7,ExpiredCleanupInterval}`, `Security:Argon2:{MemoryKiB,Iterations,Lanes,MaxConcurrency,MaxVerifyMemoryKiB,MaxVerifyIterations}` (verify ceilings budget-derived, §4.3). No real Gmail credential is created/requested by this document.
 
 ---
 
@@ -275,6 +288,8 @@ Plain-text + HTML via `IVerificationEmailComposer` from `{ toAddress, verificati
 4. assert `password_hash` now verifies the victim's password and never held any other value; `email_verified_at` set; challenge `consumed_at` set — **atomically** (both or neither).
 - valid token+password → success as above; **expired** (advance clock) → generic Invalid, account unchanged; invalid/unknown token → Invalid; **already-consumed** → Invalid; **invalidated** (by resend) → Invalid; **already-verified account** → Invalid (cannot re-set password via a stale token); password too short/long → `400` (challenge NOT consumed).
 - **Transaction failure:** if the account update or challenge consume conditional-update affects 0 rows (simulated race) → roll back: account remains unverified, `password_hash` stays as it was, token **not** marked consumed; generic Invalid.
+- **Two-phase race (required):** Phase A pre-check passes; before Phase C the challenge is consumed/invalidated (or the account verified) by a concurrent op; Phase B hashing completes; Phase C re-check detects the changed state → roll back → account unverified, no password hash committed, no partial activation, generic Invalid.
+- **No Argon2 for invalid tokens (required):** verify with a bogus/expired/consumed/invalidated token → generic Invalid and the hasher is **never invoked** (spy count == 0), proving password hashing is not a CPU amplifier for arbitrary tokens.
 - concurrent double-verify of one token+password → exactly one succeeds.
 - no plaintext token persisted (challenge `token_hash == HMAC(pepper,token)`).
 
@@ -310,7 +325,8 @@ A working local flow is not production-ready; these gates precede any public exp
 - **Stale outbox sends:** dispatcher eligibility check (present, not consumed, not invalidated, not expired) before every send; dedicated test proves an invalidated challenge's outbox is dropped + erased. ✔
 - **Recipient-address tampering:** AAD binds id+version+type+recipient (canonical length-prefixed); send-time `toAddress == recipient_email` check; tests prove tamper → no send. ✔
 - **AEAD AAD canonicalization:** length-prefixed UTF-8 per field, fixed order — no ambiguous concatenation; test covers a naive-concat collision case. ✔
-- **PHC resource exhaustion:** strict bounds + overflow-safe parse + `p=1`-only + memory ceiling, rejected as `InvalidHashFormat` before any Argon2 allocation; tests assert the KDF is not invoked for hostile inputs. ✔
+- **PHC resource exhaustion:** strict bounds + overflow-safe parse + `p=1`-only, with `m`/`t` ceilings tied to the **same 192 MiB service budget** (`MaxVerifyMemoryKiB × HashingMaxConcurrency ≤ 192 MiB`, never below active params; `MaxVerifyIterations ≈ 2× active`) — never near the whole box; rejected as `InvalidHashFormat` before any Argon2 allocation/execution; tests assert the KDF is not invoked and the ceiling cannot be bypassed. ✔
+- **No DB lock held during Argon2 / hashing as CPU amplifier:** two-phase verify (non-locking pre-check → hash with no lock → short FOR UPDATE re-check + conditional updates). Argon2 never runs under a lock and never runs for an invalid/expired/consumed/invalidated token. Authoritative re-check in Phase C; race test proves no partial activation when state changes between phases. ✔
 - **Timing enumeration:** wording corrected to best-effort (not "indistinguishable"); no dummy Argon2 in register; rate limiting mandated before public exposure. ✔
 - **Nonce reuse (AES-GCM):** 96-bit CSPRNG per row, never reused under the key; volume tiny; AAD binds to row; `payload_version` reserved for future scheme. ✔
 - **Concurrent dispatch / resend races:** atomic lease (one worker/row); `FOR UPDATE` account lock (≤1 active challenge). ✔
