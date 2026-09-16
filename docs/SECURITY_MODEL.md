@@ -165,8 +165,22 @@ identifier and does not log headers or bodies.
   `Email:SmtpAppPassword`) live only in user-secrets / production injection — never in
   Git, DB, appsettings, or logs. Mutually independent and independent of vault crypto.
   `EmailOutboxKey` rotation is drain-then-rotate (do not rotate with undrained rows).
-- **SMTP:** Gmail `smtp.gmail.com:587` STARTTLS, TLS validation on, no bypass; failures
-  isolated (never surfaced to clients). Automated tests never send real Gmail.
+- **SMTP:** Gmail `smtp.gmail.com` **port 587 STARTTLS only** (implicit-TLS/465 is not
+  accepted in v1 — the sender fails closed on any other port), TLS validation on, no
+  bypass; failures isolated (never surfaced to clients). Automated tests never send real
+  Gmail. **Two distinct timeouts:** MailKit's socket read/write `Timeout` (low-level
+  stream defense) and the **overall attempt deadline** (`AttemptTimeout`, enforced via a
+  linked `CancellationTokenSource` that cancels the entire connect→auth→send→disconnect
+  sequence). The lease invariant is validated against the **overall** `AttemptTimeout`
+  (`LeaseDuration > AttemptTimeout + margin`), so a bounded attempt always finishes within
+  its lease. Caller cancellation propagates; an internal-deadline timeout returns a
+  generic failure.
+- **Authoritative verification time:** `FinalizeVerificationAsync` reads its authoritative
+  timestamp from the server clock **only after** the `FOR UPDATE` row lock is held (the
+  locking SELECT carries no expiry predicate), so a token that expires during Argon2 or
+  during a lock wait is rejected against the true TTL. Delivery remains at-least-once
+  (a provider accept-before-crash duplicate re-sends the same single link, never a second
+  valid challenge).
 - **Anti-enumeration:** register/resend return a single generic 202; verify returns
   generic failures. Timing resistance is **best-effort** (SMTP off the request path;
   no dummy hashing in register) — mandatory rate limiting precedes public exposure.

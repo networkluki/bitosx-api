@@ -89,7 +89,8 @@ public sealed class AccountStoreTests
         Assert.Equal(r.ChallengeId, view!.ChallengeId);
 
         var phc = _ctx.Hasher.Hash("my-chosen-password");
-        var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, phc, now);
+        _ctx.Clock.SetUtcNow(now);
+        var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, phc);
         Assert.Equal(VerificationOutcome.Verified, outcome);
 
         Assert.Equal(1, await ScalarAsync("SELECT COUNT(*) FROM accounts WHERE id=@id AND email_verified_at IS NOT NULL AND password_hash IS NOT NULL", new { id = r.AccountId }));
@@ -106,9 +107,10 @@ public sealed class AccountStoreTests
         var now = AccountsTestContext.NowMicro();
         var r = await _ctx.RegisterAsync(now);
         var phc = _ctx.Hasher.Hash("pw-123456789012");
+        _ctx.Clock.SetUtcNow(now);
 
-        Assert.Equal(VerificationOutcome.Verified, await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, phc, now));
-        Assert.Equal(VerificationOutcome.InvalidOrExpired, await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, phc, now));
+        Assert.Equal(VerificationOutcome.Verified, await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, phc));
+        Assert.Equal(VerificationOutcome.InvalidOrExpired, await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, phc));
     }
 
     [Fact]
@@ -120,7 +122,9 @@ public sealed class AccountStoreTests
         var afterExpiry = now.AddMinutes(31);
 
         Assert.Null(await _ctx.VerificationStore.FindActiveChallengeByVerifierAsync(r.Verifier, afterExpiry));
-        var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, _ctx.Hasher.Hash("pw-123456789012"), afterExpiry);
+        // Store reads authoritative time from its clock (set past expiry).
+        _ctx.Clock.SetUtcNow(afterExpiry);
+        var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, _ctx.Hasher.Hash("pw-123456789012"));
         Assert.Equal(VerificationOutcome.InvalidOrExpired, outcome);
         Assert.Null(await PasswordHashAsync(r.AccountId));
     }

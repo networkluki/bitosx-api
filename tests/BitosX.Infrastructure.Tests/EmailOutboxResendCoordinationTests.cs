@@ -116,15 +116,15 @@ public sealed class EmailOutboxResendCoordinationTests
     [Fact]
     public void SmtpTimeout_IsStrictlyLessThanLeaseDuration()
     {
-        // Valid: default lease 2min > 30s + 10s margin.
+        // Valid: default lease 2min > 30s attempt + 10s margin.
         AccountsServiceCollectionExtensions.ValidateDeliveryTimeouts(
             new EmailOutboxOptions { LeaseDuration = TimeSpan.FromMinutes(2) },
-            new SmtpOptions { Timeout = TimeSpan.FromSeconds(30) });
+            new SmtpOptions { AttemptTimeout = TimeSpan.FromSeconds(30) });
 
-        // Invalid: lease not greater than timeout + margin → fail closed.
+        // Invalid: lease not greater than attempt timeout + margin → fail closed.
         Assert.Throws<InvalidOperationException>(() =>
             AccountsServiceCollectionExtensions.ValidateDeliveryTimeouts(
                 new EmailOutboxOptions { LeaseDuration = TimeSpan.FromSeconds(35) },
-                new SmtpOptions { Timeout = TimeSpan.FromSeconds(30) }));
+                new SmtpOptions { AttemptTimeout = TimeSpan.FromSeconds(30) }));
     }
 }

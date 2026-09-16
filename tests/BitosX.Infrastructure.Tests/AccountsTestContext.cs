@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using BitosX.Application.Abstractions.Persistence;
 using BitosX.Application.Accounts;
+using Microsoft.Extensions.Time.Testing;
 using BitosX.Application.Email;
 using BitosX.Application.Verification;
 using BitosX.Infrastructure.Email;
@@ -19,6 +20,9 @@ internal sealed class AccountsTestContext
     public EmailVerificationStore VerificationStore { get; }
     public EmailOutboxStore OutboxStore { get; }
 
+    /// <summary>Clock owned by the verification store; tests set it to control authoritative finalize time.</summary>
+    public FakeTimeProvider Clock { get; } = new(new DateTimeOffset(2026, 9, 16, 12, 0, 0, TimeSpan.Zero));
+
     public AccountsTestContext(BitosxConnectionFactory factory)
     {
         Tokens = new HmacEmailVerificationTokenFactory(new EmailVerificationSecurityOptions
@@ -34,7 +38,7 @@ internal sealed class AccountsTestContext
             new Application.Security.Argon2ParametersOptions { MemoryKiB = 8192, Iterations = 1, Lanes = 1, MaxConcurrency = 2 },
             new KonsciousArgon2Core());
         RegistrationStore = new AccountRegistrationStore(factory);
-        VerificationStore = new EmailVerificationStore(factory);
+        VerificationStore = new EmailVerificationStore(factory, Clock);
         OutboxStore = new EmailOutboxStore(factory);
     }
 

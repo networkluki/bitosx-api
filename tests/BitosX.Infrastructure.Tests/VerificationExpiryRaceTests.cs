@@ -1,3 +1,4 @@
+using BitosX.Application.Abstractions.Persistence;
 using BitosX.Application.Security;
 using BitosX.Application.Verification;
 using Dapper;
@@ -34,18 +35,19 @@ public sealed class VerificationExpiryRaceTests
     {
         await _fixture.ResetAsync();
         var start = new DateTimeOffset(2026, 9, 16, 12, 0, 0, TimeSpan.Zero);
-        var clock = new FakeTimeProvider(start);
+        _ctx.Clock.SetUtcNow(start.UtcDateTime); // store + service share this clock
 
         // Challenge expires 100ms after start.
         var r = await _ctx.RegisterAsync(start.UtcDateTime, ttl: TimeSpan.FromMilliseconds(100));
 
-        // Hashing "takes" 200ms → the token expires during Phase B.
-        var hasher = new AdvancingHasher(_ctx.Hasher, clock, TimeSpan.FromMilliseconds(200));
+        // Hashing "takes" 200ms → the token expires during Phase B; the store reads its
+        // authoritative time AFTER the lock and rejects it.
+        var hasher = new AdvancingHasher(_ctx.Hasher, _ctx.Clock, TimeSpan.FromMilliseconds(200));
         var factory = new VerificationChallengeFactory(_ctx.Tokens, _ctx.Protector, new EmailVerificationSecurityOptions { Pepper = "x" });
         var service = new EmailVerificationService(
             new BitosX.Infrastructure.Persistence.AccountRepository(_fixture.ConnectionFactory),
             _ctx.VerificationStore, _ctx.Tokens, factory, hasher,
-            new EmailVerificationSecurityOptions { Pepper = "x" }, clock);
+            new EmailVerificationSecurityOptions { Pepper = "x" }, _ctx.Clock);
 
         var result = await service.VerifyAsync(new VerifyEmailCommand(r.Token, "a-valid-password-123"));
 
@@ -62,18 +64,37 @@ public sealed class VerificationExpiryRaceTests
     {
         await _fixture.ResetAsync();
         var start = new DateTimeOffset(2026, 9, 16, 12, 0, 0, TimeSpan.Zero);
-        var clock = new FakeTimeProvider(start);
+        _ctx.Clock.SetUtcNow(start.UtcDateTime);
         var r = await _ctx.RegisterAsync(start.UtcDateTime, ttl: TimeSpan.FromMinutes(30));
 
-        var hasher = new AdvancingHasher(_ctx.Hasher, clock, TimeSpan.FromMilliseconds(200)); // well within TTL
+        var hasher = new AdvancingHasher(_ctx.Hasher, _ctx.Clock, TimeSpan.FromMilliseconds(200)); // well within TTL
         var factory = new VerificationChallengeFactory(_ctx.Tokens, _ctx.Protector, new EmailVerificationSecurityOptions { Pepper = "x" });
         var service = new EmailVerificationService(
             new BitosX.Infrastructure.Persistence.AccountRepository(_fixture.ConnectionFactory),
             _ctx.VerificationStore, _ctx.Tokens, factory, hasher,
-            new EmailVerificationSecurityOptions { Pepper = "x" }, clock);
+            new EmailVerificationSecurityOptions { Pepper = "x" }, _ctx.Clock);
 
         var result = await service.VerifyAsync(new VerifyEmailCommand(r.Token, "a-valid-password-123"));
         Assert.Equal(VerifyResult.Verified, result);
+    }
+
+    [Fact]
+    public async Task Finalize_ReadsAuthoritativeTimeAfterLock_RejectsIfExpiredMeanwhile()
+    {
+        // Direct store test of the "time advanced by the time the lock was acquired" case.
+        await _fixture.ResetAsync();
+        var start = new DateTimeOffset(2026, 9, 16, 12, 0, 0, TimeSpan.Zero);
+        _ctx.Clock.SetUtcNow(start.UtcDateTime);
+        var r = await _ctx.RegisterAsync(start.UtcDateTime, ttl: TimeSpan.FromMilliseconds(100));
+
+        // As if the FOR UPDATE lock wait pushed the authoritative clock past expiry.
+        _ctx.Clock.SetUtcNow(start.UtcDateTime.AddMilliseconds(200));
+
+        var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, _ctx.Hasher.Hash("a-valid-password-123"));
+
+        Assert.Equal(VerificationOutcome.InvalidOrExpired, outcome);
+        Assert.Equal(1L, await ScalarAsync("SELECT COUNT(*) FROM accounts WHERE id=@id AND password_hash IS NULL AND email_verified_at IS NULL", r.AccountId));
+        Assert.Equal(1L, await ScalarAsync("SELECT COUNT(*) FROM email_verification_challenges WHERE id=@id AND consumed_at IS NULL", r.ChallengeId));
     }
 
     private async Task<long> ScalarAsync(string sql, Guid id)

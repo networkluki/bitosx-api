@@ -35,13 +35,15 @@ public interface IEmailVerificationStore
         byte[] verifierHash, DateTime nowUtc, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Phase C: FOR UPDATE re-check of all authoritative conditions, then sets
-    /// account.password_hash + email_verified_at and challenge.consumed_at via
-    /// conditional (affected=1) updates. Rolls back to InvalidOrExpired if state
-    /// changed since the pre-check — no partial activation.
+    /// Phase C: FOR UPDATE the challenge/account, then read an authoritative timestamp
+    /// AFTER the lock is held and evaluate expiry against it (never a caller-supplied
+    /// time — the lock may have been waited on). Sets account.password_hash +
+    /// email_verified_at and challenge.consumed_at via conditional (affected=1) updates,
+    /// all stamped with that same authoritative time. Rolls back to InvalidOrExpired if
+    /// expired or if state changed — no partial activation. The store owns the clock.
     /// </summary>
     Task<VerificationOutcome> FinalizeVerificationAsync(
-        byte[] verifierHash, string passwordHashPhc, DateTime nowUtc, CancellationToken cancellationToken = default);
+        byte[] verifierHash, string passwordHashPhc, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Resend: FOR UPDATE the unverified account, invalidate all active

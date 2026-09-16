@@ -87,12 +87,11 @@ public sealed class EmailVerificationService : IEmailVerificationService
         // Phase B — expensive hash, no DB lock held.
         var phc = _hasher.Hash(command.Password);
 
-        // Phase C — authoritative transaction. Use a FRESH timestamp acquired AFTER
-        // hashing so a token that expired during Argon2 is rejected against the 30-min
-        // TTL (never the stale pre-check time). This same timestamp stamps
-        // email_verified_at / password_hash / consumed_at / updated_at.
-        var finalizeNow = _clock.GetUtcNow().UtcDateTime;
-        var outcome = await _store.FinalizeVerificationAsync(verifier, phc, finalizeNow, cancellationToken).ConfigureAwait(false);
+        // Phase C — authoritative transaction. The store acquires the row lock and reads
+        // its own authoritative timestamp AFTER the lock is held (so a token that expired
+        // during Argon2 OR during a lock wait is rejected against the 30-min TTL). The
+        // pre-check time above is not treated as authoritative.
+        var outcome = await _store.FinalizeVerificationAsync(verifier, phc, cancellationToken).ConfigureAwait(false);
         return outcome == VerificationOutcome.Verified ? VerifyResult.Verified : VerifyResult.Invalid;
     }
 

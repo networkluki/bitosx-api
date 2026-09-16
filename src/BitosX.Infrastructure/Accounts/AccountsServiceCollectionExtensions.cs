@@ -82,11 +82,12 @@ public static class AccountsServiceCollectionExtensions
                 sp.GetRequiredService<EmailVerificationSecurityOptions>()));
         services.AddSingleton<IVerificationEmailComposer>(sp =>
             new VerificationEmailComposer(sp.GetRequiredService<EmailOptions>()));
+        services.AddSingleton<ISmtpTransportFactory, MailKitSmtpTransportFactory>();
         services.AddSingleton<IEmailSender, MailKitGmailEmailSender>();
 
         // ---- Stores (runtime DML connection) ----
         services.AddSingleton<IAccountRegistrationStore>(_ => new AccountRegistrationStore(connectionFactory));
-        services.AddSingleton<IEmailVerificationStore>(_ => new EmailVerificationStore(connectionFactory));
+        services.AddSingleton<IEmailVerificationStore>(sp => new EmailVerificationStore(connectionFactory, sp.GetRequiredService<TimeProvider>()));
         services.AddSingleton<IEmailOutboxStore>(_ => new EmailOutboxStore(connectionFactory));
 
         // ---- Services ----
@@ -110,11 +111,11 @@ public static class AccountsServiceCollectionExtensions
     /// </summary>
     public static void ValidateDeliveryTimeouts(EmailOutboxOptions outbox, SmtpOptions smtp)
     {
-        if (outbox.LeaseDuration <= smtp.Timeout + DeliveryTimeoutSafetyMargin)
+        if (outbox.LeaseDuration <= smtp.AttemptTimeout + DeliveryTimeoutSafetyMargin)
         {
             throw new InvalidOperationException(
-                $"Email outbox LeaseDuration ({outbox.LeaseDuration}) must exceed SMTP timeout " +
-                $"({smtp.Timeout}) plus a {DeliveryTimeoutSafetyMargin} safety margin.");
+                $"Email outbox LeaseDuration ({outbox.LeaseDuration}) must exceed the overall SMTP " +
+                $"AttemptTimeout ({smtp.AttemptTimeout}) plus a {DeliveryTimeoutSafetyMargin} safety margin.");
         }
     }
 
