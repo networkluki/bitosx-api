@@ -63,6 +63,20 @@ public sealed class EmailOutboxStore : IEmailOutboxStore
             r.AttemptCount, r.ChallengeConsumedAt, r.ChallengeInvalidatedAt, r.ChallengeExpiresAt)).ToList();
     }
 
+    public async Task<OutboxDeliveryState?> GetDeliveryStateAsync(Guid outboxId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        return await connection.QuerySingleOrDefaultAsync<OutboxDeliveryState>(new CommandDefinition(
+            """
+            SELECT o.sent_at AS OutboxSentAt, o.failed_at AS OutboxFailedAt,
+                   c.consumed_at AS ChallengeConsumedAt, c.invalidated_at AS ChallengeInvalidatedAt,
+                   c.expires_at AS ChallengeExpiresAt
+            FROM email_outbox o
+            JOIN email_verification_challenges c ON c.id = o.challenge_id
+            WHERE o.id = @outboxId;
+            """, new { outboxId }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+    }
+
     public Task MarkSentAndErasePayloadAsync(Guid id, DateTime nowUtc, CancellationToken cancellationToken = default)
         => ExecuteAsync(
             """

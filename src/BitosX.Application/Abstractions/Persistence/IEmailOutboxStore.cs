@@ -17,9 +17,20 @@ public sealed record OutboxDueRow(
     DateTime? ChallengeInvalidatedAt,
     DateTime ChallengeExpiresAt);
 
+/// <summary>Fresh authoritative state for a claimed outbox row + its challenge (re-checked before send).</summary>
+public sealed record OutboxDeliveryState(
+    DateTime? OutboxSentAt,
+    DateTime? OutboxFailedAt,
+    DateTime? ChallengeConsumedAt,
+    DateTime? ChallengeInvalidatedAt,
+    DateTime ChallengeExpiresAt);
+
 /// <summary>Durable email outbox operations (dispatcher-facing).</summary>
 public interface IEmailOutboxStore
 {
+    /// <summary>Reads current outbox + challenge state for an eligibility re-check immediately before send.</summary>
+    Task<OutboxDeliveryState?> GetDeliveryStateAsync(Guid outboxId, CancellationToken cancellationToken = default);
+
     /// <summary>Atomically leases up to <paramref name="batchSize"/> due rows for this worker.</summary>
     Task<IReadOnlyList<OutboxDueRow>> ClaimDueAsync(
         DateTime nowUtc, DateTime leaseUntil, string workerId, int batchSize, CancellationToken cancellationToken = default);

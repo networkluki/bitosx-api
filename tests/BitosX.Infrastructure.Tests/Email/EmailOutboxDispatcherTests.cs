@@ -33,9 +33,10 @@ public sealed class EmailOutboxDispatcherTests
 
     private EmailOutboxDispatcher Dispatcher(FakeEmailSender sender, FakeTimeProvider clock, EmailOutboxOptions? opts = null)
     {
+        var options = opts ?? new EmailOutboxOptions();
         var composer = new VerificationEmailComposer(new EmailOptions { FromAddress = "b@x.io", PublicBaseUrl = "https://vault.bitosx.se" });
         return new EmailOutboxDispatcher(_ctx.OutboxStore, _ctx.Protector, sender, composer,
-            opts ?? new EmailOutboxOptions(), new EmailVerificationSecurityOptions { Pepper = "x" },
+            options, new DefaultEmailRetryBackoff(options, () => 0.5),
             clock, NullLogger<EmailOutboxDispatcher>.Instance);
     }
 
@@ -145,6 +146,50 @@ public sealed class EmailOutboxDispatcherTests
         await Dispatcher(sender, new FakeTimeProvider(now.AddMinutes(1)), opts).ProcessDueOnceAsync();
         Assert.Equal(1, await ScalarAsync<long>("SELECT COUNT(*) FROM email_outbox WHERE id=@id AND failed_at IS NOT NULL AND payload_ciphertext IS NULL", new { id = r.OutboxId }));
         Assert.Empty(sender.Sent);
+    }
+
+    [Fact]
+    public async Task InvalidatedBetweenClaimAndSend_FreshRecheck_DoesNotSend()
+    {
+        await _fixture.ResetAsync();
+        var now = AccountsTestContext.NowMicro();
+        var r = await _ctx.RegisterAsync(now);
+        var sender = new FakeEmailSender();
+        var dispatcher = Dispatcher(sender, new FakeTimeProvider(now));
+
+        // Claim the row (active snapshot), then a concurrent resend invalidates the challenge.
+        var claimed = await _ctx.OutboxStore.ClaimDueAsync(now, now.AddMinutes(1), "w", 10);
+        Assert.Single(claimed);
+        await ExecAsync("UPDATE email_verification_challenges SET invalidated_at=@t WHERE id=@id", new { t = now, id = r.ChallengeId });
+
+        // Fresh pre-send re-check must reject despite the stale "active" snapshot.
+        var sent = await dispatcher.TryDeliverClaimedRowAsync(claimed[0]);
+
+        Assert.False(sent);
+        Assert.Empty(sender.Sent);
+        Assert.Equal(1, await ScalarAsync<long>("SELECT COUNT(*) FROM email_outbox WHERE id=@id AND failed_at IS NOT NULL AND payload_ciphertext IS NULL", new { id = r.OutboxId }));
+    }
+
+    [Fact]
+    public async Task ExpiredBetweenClaimAndSend_FreshRecheck_DoesNotSend()
+    {
+        await _fixture.ResetAsync();
+        var now = AccountsTestContext.NowMicro();
+        var r = await _ctx.RegisterAsync(now, ttl: TimeSpan.FromMinutes(30));
+        var sender = new FakeEmailSender();
+        var clock = new FakeTimeProvider(now);
+        var dispatcher = Dispatcher(sender, clock);
+
+        var claimed = await _ctx.OutboxStore.ClaimDueAsync(now, now.AddMinutes(1), "w", 10);
+        Assert.Single(claimed);
+
+        // Time advances past expiry before delivery; the fresh per-row timestamp rejects it.
+        clock.SetUtcNow(now.AddMinutes(31));
+        var sent = await dispatcher.TryDeliverClaimedRowAsync(claimed[0]);
+
+        Assert.False(sent);
+        Assert.Empty(sender.Sent);
+        Assert.Equal(1, await ScalarAsync<long>("SELECT COUNT(*) FROM email_outbox WHERE id=@id AND failed_at IS NOT NULL AND payload_ciphertext IS NULL", new { id = r.OutboxId }));
     }
 
     [Fact]

@@ -27,7 +27,7 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
     private readonly IEmailSender _sender;
     private readonly IVerificationEmailComposer _composer;
     private readonly EmailOutboxOptions _options;
-    private readonly EmailVerificationSecurityOptions _verification;
+    private readonly IEmailRetryBackoff _backoff;
     private readonly TimeProvider _clock;
     private readonly ILogger<EmailOutboxDispatcher> _logger;
     private readonly string _workerId = $"outbox-{Guid.NewGuid():N}";
@@ -38,7 +38,7 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
         IEmailSender sender,
         IVerificationEmailComposer composer,
         EmailOutboxOptions options,
-        EmailVerificationSecurityOptions verification,
+        IEmailRetryBackoff backoff,
         TimeProvider clock,
         ILogger<EmailOutboxDispatcher> logger)
     {
@@ -47,7 +47,7 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
         _sender = sender;
         _composer = composer;
         _options = options;
-        _verification = verification;
+        _backoff = backoff;
         _clock = clock;
         _logger = logger;
     }
@@ -61,20 +61,37 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
         foreach (var row in rows)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await ProcessRowAsync(row, now, cancellationToken).ConfigureAwait(false);
+            await TryDeliverClaimedRowAsync(row, cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private async Task ProcessRowAsync(OutboxDueRow row, DateTime now, CancellationToken cancellationToken)
+    /// <summary>
+    /// Delivers a single claimed row. Re-reads the row + challenge state FRESH from the
+    /// database with a fresh per-row timestamp immediately before send — it never trusts
+    /// the (possibly stale) snapshot captured at claim time. Returns true if an email was sent.
+    /// </summary>
+    public async Task<bool> TryDeliverClaimedRowAsync(OutboxDueRow row, CancellationToken cancellationToken = default)
     {
-        // (1) Eligibility BEFORE decrypt/send: challenge must still be active.
-        var challengeActive = row.ChallengeConsumedAt is null
-            && row.ChallengeInvalidatedAt is null
-            && row.ChallengeExpiresAt > now;
-        if (!challengeActive)
+        // Fresh per-row timestamp + fresh authoritative state (guards claim→send races).
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var state = await _store.GetDeliveryStateAsync(row.Id, cancellationToken).ConfigureAwait(false);
+
+        var eligible = state is not null
+            && state.OutboxSentAt is null
+            && state.OutboxFailedAt is null
+            && state.ChallengeConsumedAt is null
+            && state.ChallengeInvalidatedAt is null
+            && state.ChallengeExpiresAt > now;
+
+        if (!eligible)
         {
-            await _store.MarkFailedAndErasePayloadAsync(row.Id, now, cancellationToken).ConfigureAwait(false);
-            return; // never send a stale/expired/consumed/invalidated verification link
+            // Mark terminal + erase only if still non-terminal (avoid clobbering a prior state).
+            if (state is not null && state.OutboxSentAt is null && state.OutboxFailedAt is null)
+            {
+                await _store.MarkFailedAndErasePayloadAsync(row.Id, now, cancellationToken).ConfigureAwait(false);
+            }
+
+            return false; // never send a stale/expired/consumed/invalidated verification link
         }
 
         // (2) Recipient integrity: AEAD AAD binds the recipient; decrypt authenticates it.
@@ -83,7 +100,7 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
         {
             _logger.LogWarning("Outbox message {OutboxId} failed payload integrity check; not sending.", row.Id);
             await _store.MarkFailedAndErasePayloadAsync(row.Id, now, cancellationToken).ConfigureAwait(false);
-            return;
+            return false;
         }
 
         // (3) Defense-in-depth: decrypted recipient must equal the authenticated row recipient.
@@ -91,7 +108,7 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
         {
             _logger.LogWarning("Outbox message {OutboxId} recipient mismatch; not sending.", row.Id);
             await _store.MarkFailedAndErasePayloadAsync(row.Id, now, cancellationToken).ConfigureAwait(false);
-            return;
+            return false;
         }
 
         // (4) Compose + send.
@@ -102,15 +119,15 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
         if (result == EmailSendResult.Sent)
         {
             await _store.MarkSentAndErasePayloadAsync(row.Id, now, cancellationToken).ConfigureAwait(false);
-            return;
+            return true;
         }
 
-        // (5) Transient failure: retry with backoff only if the next attempt is still
-        // within the token lifetime; otherwise fail terminally (never extend the TTL).
+        // (5) Transient failure: retry with bounded exponential backoff + jitter, but only
+        // if the next attempt is still within the token lifetime; otherwise fail terminally
+        // (never extend the TTL). state.ChallengeExpiresAt is the fresh authoritative expiry.
         var nextAttempt = row.AttemptCount + 1;
-        var delay = TimeSpan.FromSeconds(_options.BackoffBase.TotalSeconds * Math.Pow(2, row.AttemptCount));
-        var nextAvailable = now + delay;
-        if (nextAttempt >= _options.MaxAttempts || nextAvailable >= row.ChallengeExpiresAt)
+        var nextAvailable = now + _backoff.NextDelay(row.AttemptCount);
+        if (nextAttempt >= _options.MaxAttempts || nextAvailable >= state!.ChallengeExpiresAt)
         {
             await _store.MarkFailedAndErasePayloadAsync(row.Id, now, cancellationToken).ConfigureAwait(false);
         }
@@ -118,6 +135,8 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
         {
             await _store.RescheduleAsync(row.Id, nextAvailable, now, cancellationToken).ConfigureAwait(false);
         }
+
+        return false;
     }
 
     public async Task RunCleanupOnceAsync(CancellationToken cancellationToken = default)

@@ -90,6 +90,7 @@ public static class AccountsServiceCollectionExtensions
         services.AddScoped<IEmailVerificationService, EmailVerificationService>();
 
         // ---- Background outbox dispatcher ----
+        services.AddSingleton<IEmailRetryBackoff>(sp => new DefaultEmailRetryBackoff(sp.GetRequiredService<EmailOutboxOptions>()));
         services.AddSingleton<IEmailOutboxDispatcher, EmailOutboxDispatcher>();
         services.AddHostedService<EmailOutboxBackgroundService>();
 
