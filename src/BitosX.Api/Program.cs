@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using BitosX.Api.Endpoints;
 using BitosX.Api.Http;
 using BitosX.Application.Versioning;
+using BitosX.Infrastructure.Accounts;
 using BitosX.Infrastructure.Persistence;
 using BitosX.Infrastructure.Versioning;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -63,12 +64,27 @@ builder.Services.AddSingleton<IProductVersionProvider>(
 // local secret store, never committed). It stays absent for the loopback
 // health/version foundation, and no auth/account behavior is exposed yet.
 var bitosxConnectionString = builder.Configuration.GetConnectionString("Bitosx");
+var accountsEnabled = false;
 if (!string.IsNullOrWhiteSpace(bitosxConnectionString))
 {
     // Runtime uses a DML-only account; the migrator (optional) uses a separate
     // schema-management account. Neither credential is committed.
     var bitosxMigratorConnectionString = builder.Configuration.GetConnectionString("BitosxMigrator");
     builder.Services.AddBitosxPersistence(bitosxConnectionString, bitosxMigratorConnectionString);
+
+    // The account subsystem is enabled only when its secrets are configured
+    // (verification pepper, outbox key, SMTP app password). Absent any of them,
+    // the API stays persistence-only and exposes no auth endpoints — the Gmail
+    // sender is never constructed.
+    accountsEnabled =
+        !string.IsNullOrWhiteSpace(builder.Configuration["Security:EmailVerificationPepper"])
+        && !string.IsNullOrWhiteSpace(builder.Configuration["Security:EmailOutboxKey"])
+        && !string.IsNullOrWhiteSpace(builder.Configuration["Email:SmtpAppPassword"]);
+
+    if (accountsEnabled)
+    {
+        builder.Services.AddBitosxAccounts(builder.Configuration, bitosxConnectionString);
+    }
 }
 
 var app = builder.Build();
@@ -90,6 +106,12 @@ app.MapInfrastructureEndpoints();
 
 // Future versioned business API surface (currently empty).
 app.MapApiV1();
+
+// Account endpoints are exposed only when the account subsystem is configured.
+if (accountsEnabled)
+{
+    app.MapAuthEndpoints();
+}
 
 // Extensibility seam for endpoint contributions registered in DI. No modules
 // are registered in production; integration tests use this to exercise the
