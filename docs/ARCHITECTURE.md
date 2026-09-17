@@ -127,8 +127,9 @@ DI `AccountCapabilities` singleton (never re-derived in endpoints):
 
 Presence vs. malformed: an optional capability whose secrets are **absent** is simply
 disabled (the API still starts). A capability whose secrets are **present but malformed**
-fails closed at startup (throws) — e.g. an invalid `EmailOutboxKey` or a non-587 SMTP
-port. When EmailVerification is enabled but EmailDelivery is not, `register` and
+fails closed at startup (throws) — e.g. an invalid `EmailOutboxKey`, a non-587 SMTP
+port, a **partial verification config** (only one of pepper/outbox key set), or an
+explicitly-enabled delivery (SMTP app password present) with missing username/FromAddress. When EmailVerification is enabled but EmailDelivery is not, `register` and
 `resend-verification` return a generic **503** (routes stay mapped; nothing is enqueued),
 while `verify-email` remains available. Capability booleans are logged at startup but are
 **not** exposed on the public `/health` endpoint.

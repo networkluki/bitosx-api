@@ -33,21 +33,82 @@ public static class AccountsServiceCollectionExtensions
     public static AccountCapabilities DetectCapabilities(IConfiguration configuration)
     {
         var accountCore = !string.IsNullOrWhiteSpace(configuration.GetConnectionString("Bitosx"));
+        if (!accountCore)
+        {
+            return AccountCapabilities.None;
+        }
 
-        var verification = accountCore
-            && !string.IsNullOrWhiteSpace(configuration["Security:EmailVerificationPepper"])
-            && !string.IsNullOrWhiteSpace(configuration["Security:EmailOutboxKey"]);
+        // EmailVerification: the two verification secrets must be set TOGETHER. A partial
+        // configuration (exactly one present) is inconsistent → fail closed, never a
+        // silent partial-verification capability.
+        var pepperSet = !string.IsNullOrWhiteSpace(configuration["Security:EmailVerificationPepper"]);
+        var outboxKeySet = !string.IsNullOrWhiteSpace(configuration["Security:EmailOutboxKey"]);
+        bool verification;
+        if (pepperSet && outboxKeySet)
+        {
+            verification = true;
+        }
+        else if (!pepperSet && !outboxKeySet)
+        {
+            verification = false;
+        }
+        else
+        {
+            throw new InvalidOperationException(
+                "Partial EmailVerification configuration: Security:EmailVerificationPepper and " +
+                "Security:EmailOutboxKey must both be set, or both be absent.");
+        }
 
-        var delivery = verification
-            && !string.IsNullOrWhiteSpace(configuration["Email:SmtpUsername"])
-            && !string.IsNullOrWhiteSpace(configuration["Email:SmtpAppPassword"]);
+        // EmailDelivery: presence of the SMTP app password is the explicit "enable delivery"
+        // signal. When present, all SMTP configuration must be complete and valid (fail
+        // closed) and EmailVerification must be enabled. When absent, delivery is disabled
+        // and any remaining non-secret SMTP metadata is harmless.
+        var deliveryRequested = !string.IsNullOrWhiteSpace(configuration["Email:SmtpAppPassword"]);
+        var delivery = false;
+        if (deliveryRequested)
+        {
+            if (!verification)
+            {
+                throw new InvalidOperationException(
+                    "EmailDelivery requires EmailVerification (Security:EmailVerificationPepper + Security:EmailOutboxKey).");
+            }
+
+            ValidateDeliveryConfiguration(configuration); // throws on invalid SMTP config
+            delivery = true;
+        }
 
         return new AccountCapabilities
         {
-            AccountCoreEnabled = accountCore,
+            AccountCoreEnabled = true,
             EmailVerificationEnabled = verification,
             EmailDeliveryEnabled = delivery,
         };
+    }
+
+    /// <summary>Validates SMTP config when delivery is explicitly enabled (app password present).</summary>
+    private static void ValidateDeliveryConfiguration(IConfiguration configuration)
+    {
+        if (string.IsNullOrWhiteSpace(configuration["Email:SmtpUsername"]))
+        {
+            throw new InvalidOperationException("EmailDelivery enabled but Email:SmtpUsername is missing.");
+        }
+
+        if (string.IsNullOrWhiteSpace(configuration["Email:FromAddress"]))
+        {
+            throw new InvalidOperationException("EmailDelivery enabled but Email:FromAddress is missing.");
+        }
+
+        if (configuration.GetValue("Email:SmtpPort", 587) != 587)
+        {
+            throw new InvalidOperationException("EmailDelivery enabled but Email:SmtpPort must be 587 (STARTTLS).");
+        }
+
+        var outbox = new EmailOutboxOptions();
+        configuration.GetSection("Email:Outbox").Bind(outbox);
+        var smtp = new SmtpOptions();
+        var attemptSeconds = configuration.GetValue<int?>("Email:AttemptTimeoutSeconds");
+        if (attemptSeconds is > 0) smtp.AttemptTimeout = TimeSpan.FromSeconds(attemptSeconds.Value);
+        ValidateDeliveryTimeouts(outbox, smtp);
     }
 
     // ---- AccountCore: DB-backed password hashing (no SMTP dependency) ----

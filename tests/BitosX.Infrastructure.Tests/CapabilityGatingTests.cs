@@ -76,6 +76,73 @@ public sealed class CapabilityGatingTests
         Assert.False(c.EmailDeliveryEnabled);
     }
 
+    private static IConfiguration Raw(Dictionary<string, string?> d)
+        => new ConfigurationBuilder().AddInMemoryCollection(d).Build();
+
+    [Fact]
+    public void Detect_PartialVerification_PepperOnly_FailsClosed()
+    {
+        var cfg = Raw(new() { ["ConnectionStrings:Bitosx"] = DummyConn, ["Security:EmailVerificationPepper"] = "p" });
+        Assert.Throws<InvalidOperationException>(() => AccountsServiceCollectionExtensions.DetectCapabilities(cfg));
+    }
+
+    [Fact]
+    public void Detect_PartialVerification_OutboxKeyOnly_FailsClosed()
+    {
+        var cfg = Raw(new() { ["ConnectionStrings:Bitosx"] = DummyConn, ["Security:EmailOutboxKey"] = ValidOutboxKey() });
+        Assert.Throws<InvalidOperationException>(() => AccountsServiceCollectionExtensions.DetectCapabilities(cfg));
+    }
+
+    [Fact]
+    public void Detect_SmtpMetadataWithoutAppPassword_DeliveryDisabled_NoThrow()
+    {
+        var cfg = Raw(new()
+        {
+            ["ConnectionStrings:Bitosx"] = DummyConn,
+            ["Security:EmailVerificationPepper"] = "p-long-random",
+            ["Security:EmailOutboxKey"] = ValidOutboxKey(),
+            ["Email:SmtpUsername"] = "bitosx@example.com",   // harmless metadata
+            ["Email:FromAddress"] = "bitosx@example.com",
+            ["Email:SmtpHost"] = "smtp.gmail.com",
+            ["Email:SmtpPort"] = "587",
+            // NO Email:SmtpAppPassword
+        });
+        var c = AccountsServiceCollectionExtensions.DetectCapabilities(cfg);
+        Assert.True(c.EmailVerificationEnabled);
+        Assert.False(c.EmailDeliveryEnabled);
+    }
+
+    [Fact]
+    public void Detect_AppPasswordWithMissingUsername_FailsClosed()
+    {
+        var cfg = Raw(new()
+        {
+            ["ConnectionStrings:Bitosx"] = DummyConn,
+            ["Security:EmailVerificationPepper"] = "p-long-random",
+            ["Security:EmailOutboxKey"] = ValidOutboxKey(),
+            ["Email:SmtpAppPassword"] = "app-password",
+            ["Email:FromAddress"] = "bitosx@example.com",
+            // NO Email:SmtpUsername
+        });
+        Assert.Throws<InvalidOperationException>(() => AccountsServiceCollectionExtensions.DetectCapabilities(cfg));
+    }
+
+    [Fact]
+    public void Detect_AppPasswordWithInvalidPort_FailsClosed()
+    {
+        var cfg = Raw(new()
+        {
+            ["ConnectionStrings:Bitosx"] = DummyConn,
+            ["Security:EmailVerificationPepper"] = "p-long-random",
+            ["Security:EmailOutboxKey"] = ValidOutboxKey(),
+            ["Email:SmtpAppPassword"] = "app-password",
+            ["Email:SmtpUsername"] = "bitosx@example.com",
+            ["Email:FromAddress"] = "bitosx@example.com",
+            ["Email:SmtpPort"] = "465", // invalid → fail closed
+        });
+        Assert.Throws<InvalidOperationException>(() => AccountsServiceCollectionExtensions.DetectCapabilities(cfg));
+    }
+
     // ---- composition ----
 
     [Fact]
