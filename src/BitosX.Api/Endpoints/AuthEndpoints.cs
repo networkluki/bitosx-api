@@ -14,12 +14,24 @@ public static class AuthEndpoints
     private const string GenericAccepted =
         "If the address can be registered or needs verification, check your email.";
 
+    private const string EmailUnavailable = "Email verification is temporarily unavailable.";
+
+    private static IResult EmailDeliveryUnavailable() => Results.Problem(
+        statusCode: StatusCodes.Status503ServiceUnavailable, title: "Service unavailable", detail: EmailUnavailable);
+
     public static IEndpointRouteBuilder MapAuthEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/v1/auth").WithTags("Auth");
 
-        group.MapPost("/register", async (RegisterRequest request, IAccountRegistrationService service, CancellationToken ct) =>
+        group.MapPost("/register", async (RegisterRequest request, AccountCapabilities capabilities, IAccountRegistrationService service, CancellationToken ct) =>
         {
+            // Email delivery unavailable: generic 503, and DO NOT enqueue undeliverable mail
+            // (the registration service is not invoked, so no account/challenge/outbox is created).
+            if (!capabilities.EmailDeliveryEnabled)
+            {
+                return EmailDeliveryUnavailable();
+            }
+
             var result = await service.RegisterAsync(new RegisterCommand(request.Email), ct);
             return result == RegistrationResult.InvalidEmail
                 ? Results.Problem(statusCode: StatusCodes.Status400BadRequest, title: "Invalid request",
@@ -43,8 +55,13 @@ public static class AuthEndpoints
             };
         }).WithName("VerifyEmail");
 
-        group.MapPost("/resend-verification", async (ResendVerificationRequest request, IEmailVerificationService service, CancellationToken ct) =>
+        group.MapPost("/resend-verification", async (ResendVerificationRequest request, AccountCapabilities capabilities, IEmailVerificationService service, CancellationToken ct) =>
         {
+            if (!capabilities.EmailDeliveryEnabled)
+            {
+                return EmailDeliveryUnavailable();
+            }
+
             await service.ResendAsync(new ResendCommand(request.Email), ct);
             return Results.Json(new AcceptedResponse(GenericAccepted), statusCode: StatusCodes.Status202Accepted);
         }).WithName("ResendVerification");

@@ -9,6 +9,7 @@ using BitosX.Infrastructure.Accounts;
 using BitosX.Infrastructure.Persistence;
 using BitosX.Infrastructure.Versioning;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.Logging;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -63,27 +64,30 @@ builder.Services.AddSingleton<IProductVersionProvider>(
 // Persistence is wired only when a connection string is configured (from a
 // local secret store, never committed). It stays absent for the loopback
 // health/version foundation, and no auth/account behavior is exposed yet.
+// Capability-based composition (detected once). AccountCore is independent of SMTP;
+// EmailVerification adds register/verify/resend + outbox; EmailDelivery adds the SMTP
+// sender + dispatcher. A missing optional capability disables only itself.
 var bitosxConnectionString = builder.Configuration.GetConnectionString("Bitosx");
-var accountsEnabled = false;
-if (!string.IsNullOrWhiteSpace(bitosxConnectionString))
+var capabilities = AccountsServiceCollectionExtensions.DetectCapabilities(builder.Configuration);
+builder.Services.AddSingleton(capabilities);
+
+if (capabilities.AccountCoreEnabled)
 {
-    // Runtime uses a DML-only account; the migrator (optional) uses a separate
-    // schema-management account. Neither credential is committed.
     var bitosxMigratorConnectionString = builder.Configuration.GetConnectionString("BitosxMigrator");
-    builder.Services.AddBitosxPersistence(bitosxConnectionString, bitosxMigratorConnectionString);
+    builder.Services.AddBitosxPersistence(bitosxConnectionString!, bitosxMigratorConnectionString);
+    builder.Services.AddBitosxAccountCore(builder.Configuration);
 
-    // The account subsystem is enabled only when its secrets are configured
-    // (verification pepper, outbox key, SMTP app password). Absent any of them,
-    // the API stays persistence-only and exposes no auth endpoints — the Gmail
-    // sender is never constructed.
-    accountsEnabled =
-        !string.IsNullOrWhiteSpace(builder.Configuration["Security:EmailVerificationPepper"])
-        && !string.IsNullOrWhiteSpace(builder.Configuration["Security:EmailOutboxKey"])
-        && !string.IsNullOrWhiteSpace(builder.Configuration["Email:SmtpAppPassword"]);
-
-    if (accountsEnabled)
+    if (capabilities.EmailVerificationEnabled)
     {
-        builder.Services.AddBitosxAccounts(builder.Configuration, bitosxConnectionString);
+        builder.Services.AddBitosxEmailVerification(builder.Configuration, bitosxConnectionString!);
+    }
+
+    // EmailDelivery (SMTP sender + background dispatcher) is registered ONLY when SMTP
+    // credentials are present. When absent, no dispatcher runs and no queued mail is
+    // attempted.
+    if (capabilities.EmailDeliveryEnabled)
+    {
+        builder.Services.AddBitosxEmailDelivery(builder.Configuration);
     }
 }
 
@@ -107,11 +111,19 @@ app.MapInfrastructureEndpoints();
 // Future versioned business API surface (currently empty).
 app.MapApiV1();
 
-// Account endpoints are exposed only when the account subsystem is configured.
-if (accountsEnabled)
+// Auth endpoints are exposed when EmailVerification is available. register/resend
+// return a generic 503 when EmailDelivery is unavailable (routes stay mapped);
+// verify-email remains available so already-issued links can be consumed.
+if (capabilities.EmailVerificationEnabled)
 {
     app.MapAuthEndpoints();
 }
+
+// Capability state is logged safely at startup (booleans only, no secrets) and is
+// deliberately NOT exposed on the public /health endpoint.
+app.Logger.LogInformation(
+    "BitosX account capabilities: AccountCore={AccountCore} EmailVerification={EmailVerification} EmailDelivery={EmailDelivery}",
+    capabilities.AccountCoreEnabled, capabilities.EmailVerificationEnabled, capabilities.EmailDeliveryEnabled);
 
 // Extensibility seam for endpoint contributions registered in DI. No modules
 // are registered in production; integration tests use this to exercise the
