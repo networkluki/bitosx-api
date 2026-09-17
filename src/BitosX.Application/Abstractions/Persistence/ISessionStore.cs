@@ -54,8 +54,50 @@ public sealed record LoginSessionCreateResult
 }
 
 /// <summary>
-/// Persistence for authenticated sessions. This checkpoint exposes ONLY atomic login session-create;
-/// refresh rotation/reuse, logout, listing, and auth-lookup are added in later checkpoints.
+/// Outcome of a refresh rotation. Coarse by design: the caller maps <see cref="Invalid"/> and
+/// <see cref="ReuseDetected"/> to a single generic refresh failure. <see cref="ReuseDetected"/> is a
+/// security event (a consumed/revoked token was presented) — strict, with NO grace window.
+/// </summary>
+public enum RefreshRotationOutcome
+{
+    Rotated,
+    Invalid,
+    ReuseDetected,
+}
+
+/// <summary>
+/// Inputs for a refresh rotation. Both verifiers are already <c>SHA-256(raw 32 token bytes)</c>
+/// (32 bytes each) — the store never receives a plaintext refresh token, JWT, password, or vault
+/// material.
+/// </summary>
+public sealed record RefreshRotationRequest
+{
+    /// <summary>Verifier of the presented (R0) token; located, locked, and re-checked.</summary>
+    public required byte[] PresentedVerifier { get; init; }
+
+    /// <summary>Verifier to persist for the new (R1) token on successful rotation.</summary>
+    public required byte[] NextVerifier { get; init; }
+}
+
+/// <summary>
+/// Result of a refresh rotation. Exposes only non-secret metadata on success — never a verifier,
+/// <c>token_hash</c>, plaintext token, or DB row internals.
+/// </summary>
+public sealed record RefreshRotationResult
+{
+    public required RefreshRotationOutcome Outcome { get; init; }
+    public Guid AccountId { get; init; }
+    public Guid SessionId { get; init; }
+    public DateTime RotatedAt { get; init; }
+    public DateTime NextRefreshExpiresAt { get; init; }
+
+    public static RefreshRotationResult Invalid { get; } = new() { Outcome = RefreshRotationOutcome.Invalid };
+    public static RefreshRotationResult ReuseDetected { get; } = new() { Outcome = RefreshRotationOutcome.ReuseDetected };
+}
+
+/// <summary>
+/// Persistence for authenticated sessions. This checkpoint exposes atomic login session-create and
+/// strict refresh rotation/reuse; logout, listing, and auth-lookup are added in later checkpoints.
 /// </summary>
 public interface ISessionStore
 {
@@ -67,5 +109,19 @@ public interface ISessionStore
     /// </summary>
     Task<LoginSessionCreateResult> CreateOnLoginAsync(
         LoginSessionCreateRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically rotate a refresh token. A non-locking locator resolves account/session/token from
+    /// the presented verifier, then locks accounts → sessions → refresh_tokens (separate statements),
+    /// reads authoritative time after the locks, and re-validates. <b>Strict reuse (no grace window):</b>
+    /// if the presented token is already consumed or revoked, the session and its still-active refresh
+    /// tokens are revoked (session-scoped) and <see cref="RefreshRotationOutcome.ReuseDetected"/> is
+    /// returned with nothing issued. An active-but-stale token → <see cref="RefreshRotationOutcome.Invalid"/>
+    /// (no revocation). A fresh active token → consume R0, insert R1 (caller's <c>NextVerifier</c>), link
+    /// R0→R1, bump <c>last_seen_at</c>, commit, and return <see cref="RefreshRotationOutcome.Rotated"/>.
+    /// </summary>
+    Task<RefreshRotationResult> RotateAsync(
+        RefreshRotationRequest request,
         CancellationToken cancellationToken = default);
 }
