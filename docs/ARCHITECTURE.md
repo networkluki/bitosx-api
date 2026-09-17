@@ -108,3 +108,27 @@ account/auth behavior yet). Details in [`PERSISTENCE.md`](PERSISTENCE.md).
 - **API** maps `/v1/auth/{register,verify-email,resend-verification}`.
 - Delivery is decoupled from the request via a transactional outbox; SMTP never runs
   in the HTTP request path. See `SECURITY_MODEL.md` and `PERSISTENCE.md`.
+
+### Capability-based composition
+
+The account subsystem composes as three independent capabilities, detected once at
+startup (`AccountsServiceCollectionExtensions.DetectCapabilities`) and exposed via a
+DI `AccountCapabilities` singleton (never re-derived in endpoints):
+- **AccountCore** (`AddBitosxAccountCore`): DB + Argon2id password hashing (+ future
+  login/session/JWT). **Independent of SMTP.** Enabled when the runtime connection
+  string is configured.
+- **EmailVerification** (`AddBitosxEmailVerification`): register/verify/resend services,
+  token factory, outbox payload crypto, and outbox persistence. Enabled when the
+  verification pepper **and** outbox key are configured. Verifying an already-issued
+  token does not require SMTP.
+- **EmailDelivery** (`AddBitosxEmailDelivery`): the MailKit Gmail sender and the
+  background outbox dispatcher. Enabled only when SMTP credentials are configured;
+  when absent, **no dispatcher runs and no queued mail is attempted**.
+
+Presence vs. malformed: an optional capability whose secrets are **absent** is simply
+disabled (the API still starts). A capability whose secrets are **present but malformed**
+fails closed at startup (throws) — e.g. an invalid `EmailOutboxKey` or a non-587 SMTP
+port. When EmailVerification is enabled but EmailDelivery is not, `register` and
+`resend-verification` return a generic **503** (routes stay mapped; nothing is enqueued),
+while `verify-email` remains available. Capability booleans are logged at startup but are
+**not** exposed on the public `/health` endpoint.

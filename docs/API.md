@@ -27,6 +27,11 @@ Request: `{ "email": "user@example.com" }` → **202 Accepted**
 
 Invalid email → **400** `application/problem+json`.
 
+When **email delivery is not configured** (no SMTP credentials), `register` and
+`resend-verification` return a generic **503** `application/problem+json` and create
+nothing (no account/challenge/outbox); `verify-email` remains available so
+already-issued links can still be consumed. `/health` does not reveal capability state.
+
 ## `POST /v1/auth/verify-email`
 
 Consumes a verification token and **sets the account password** (chosen by the
