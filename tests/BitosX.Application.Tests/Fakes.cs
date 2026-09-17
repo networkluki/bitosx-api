@@ -15,9 +15,19 @@ internal sealed class FakeAccountRepository : IAccountRepository
 
     public void Seed(Account a) { _byNormalized[a.NormalizedEmail] = a; _byId[a.Id] = a; }
 
+    public int GetByNormalizedEmailCalls { get; private set; }
+    public string? LastNormalizedEmailQueried { get; private set; }
+    public List<string>? Trace { get; set; }
+
     public Task AddAsync(Account account, CancellationToken ct = default) { Seed(account); return Task.CompletedTask; }
     public Task<Account?> GetByIdAsync(Guid id, CancellationToken ct = default) => Task.FromResult(_byId.GetValueOrDefault(id));
-    public Task<Account?> GetByNormalizedEmailAsync(string n, CancellationToken ct = default) => Task.FromResult(_byNormalized.GetValueOrDefault(n));
+    public Task<Account?> GetByNormalizedEmailAsync(string n, CancellationToken ct = default)
+    {
+        GetByNormalizedEmailCalls++;
+        LastNormalizedEmailQueried = n;
+        Trace?.Add("lookup");
+        return Task.FromResult(_byNormalized.GetValueOrDefault(n));
+    }
 }
 
 internal sealed class FakeRegistrationStore : IAccountRegistrationStore
