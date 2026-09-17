@@ -4,32 +4,22 @@ using BitosX.Application.Security;
 namespace BitosX.Infrastructure.Security;
 
 /// <summary>
-/// Generates 256-bit opaque refresh tokens (URL-safe unpadded Base64) and computes their
-/// verifier as <c>HMAC-SHA256(pepper, raw 32 token bytes)</c> — the HMAC is over the RAW bytes,
-/// never the Base64 text. Only the verifier is ever persisted. Fails closed at construction on
-/// invalid pepper material.
+/// Generates 256-bit opaque refresh tokens (URL-safe unpadded Base64) and computes their verifier
+/// as <c>SHA-256(raw 32 token bytes)</c>. No server secret is involved — the token is already 256
+/// bits of CSPRNG entropy, so a plain SHA-256 verifier makes offline preimage recovery infeasible
+/// and matches the existing 32-byte <c>token_hash</c> storage. Only the verifier is ever persisted.
 ///
-/// <see cref="TryComputeVerifier"/> is strict and total: it rejects (returns false, never throws
-/// on ordinary malformed input) anything that is not exactly 43 canonical Base64URL characters
-/// decoding to exactly 32 bytes, before any HMAC work.
+/// <see cref="TryComputeVerifier"/> is strict and total: it rejects (returns false, never throws on
+/// ordinary malformed input) anything that is not exactly 43 canonical Base64URL characters decoding
+/// to exactly 32 bytes, before hashing.
 ///
-/// Memory: temporary raw token byte buffers are best-effort zeroed after use. The Base64URL
-/// token is a managed immutable <see cref="string"/> and cannot be reliably zeroed — this is a
-/// documented residual, not perfect erasure.
+/// Memory: temporary raw token byte buffers are best-effort zeroed after use. The Base64URL token is
+/// a managed immutable <see cref="string"/> and cannot be reliably zeroed — a documented residual.
 /// </summary>
-public sealed class HmacRefreshTokenFactory : IRefreshTokenFactory
+public sealed class Sha256RefreshTokenFactory : IRefreshTokenFactory
 {
     private const int TokenByteLength = 32;   // 256-bit
     private const int TokenCharLength = 43;   // unpadded Base64URL of 32 bytes
-
-    private readonly byte[] _pepperKey;
-
-    public HmacRefreshTokenFactory(RefreshTokenOptions options)
-    {
-        // Canonical standard Base64, no whitespace, ≥ 32 decoded bytes; fails closed otherwise.
-        // The decoded bytes are the long-lived HMAC key material (not the UTF-8 of the Base64 text).
-        _pepperKey = CanonicalBase64Secret.Decode(options.Pepper, "Security:RefreshTokenPepper", minBytes: 32);
-    }
 
     public GeneratedRefreshToken Generate()
     {
@@ -37,7 +27,7 @@ public sealed class HmacRefreshTokenFactory : IRefreshTokenFactory
         try
         {
             var token = Base64UrlEncode(raw);
-            var verifier = HMACSHA256.HashData(_pepperKey, raw);
+            var verifier = SHA256.HashData(raw);
             return new GeneratedRefreshToken(token, verifier);
         }
         finally
@@ -79,7 +69,7 @@ public sealed class HmacRefreshTokenFactory : IRefreshTokenFactory
                 return false;
             }
 
-            verifier = HMACSHA256.HashData(_pepperKey, raw);
+            verifier = SHA256.HashData(raw);
             return true;
         }
         finally

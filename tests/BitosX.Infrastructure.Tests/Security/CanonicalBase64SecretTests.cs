@@ -4,9 +4,10 @@ using BitosX.Infrastructure.Security;
 namespace BitosX.Infrastructure.Tests.Security;
 
 /// <summary>
-/// M-1: secret Base64 config (JwtSigningKey / JwtPreviousSigningKey / RefreshTokenPepper) must be
-/// canonical standard Base64 with no whitespace and ≥ 32 decoded bytes; anything else fails closed.
-/// Exercised through the real ctors that consume each secret (shared internal parser).
+/// M-1: JWT signing-key Base64 config (JwtSigningKey / JwtPreviousSigningKey) must be canonical
+/// standard Base64 with no whitespace and ≥ 32 decoded bytes; anything else fails closed. Exercised
+/// through the real ctors that consume each key (shared internal parser). The refresh token no
+/// longer uses a Base64 secret (SHA-256 verifier), so it is not covered here.
 /// </summary>
 public sealed class CanonicalBase64SecretTests
 {
@@ -29,9 +30,6 @@ public sealed class CanonicalBase64SecretTests
         o.PreviousSigningKey = key;
         Assert.Throws<InvalidOperationException>(() => new JwtAccessTokenService(o));
     }
-
-    private static void AssertPepperRejected(string pepper)
-        => Assert.Throws<InvalidOperationException>(() => new HmacRefreshTokenFactory(new RefreshTokenOptions { Pepper = pepper }));
 
     // ---- JWT current key ----
 
@@ -69,24 +67,6 @@ public sealed class CanonicalBase64SecretTests
         AssertJwtPreviousKeyRejected(nonCanonical);
     }
 
-    // ---- refresh pepper ----
-
-    private static string ValidPepper => Convert.ToBase64String(Enumerable.Repeat((byte)0x5A, 32).ToArray());
-
-    [Fact] public void Pepper_LeadingWhitespace_Rejected() => AssertPepperRejected(" " + ValidPepper);
-    [Fact] public void Pepper_TrailingWhitespace_Rejected() => AssertPepperRejected(ValidPepper + " ");
-    [Fact] public void Pepper_EmbeddedSpace_Rejected() => AssertPepperRejected(Insert(ValidPepper, 10, " "));
-    [Fact] public void Pepper_EmbeddedNewline_Rejected() => AssertPepperRejected(Insert(ValidPepper, 10, "\n"));
-    [Fact] public void Pepper_EmbeddedTab_Rejected() => AssertPepperRejected(Insert(ValidPepper, 10, "\t"));
-
-    [Fact]
-    public void Pepper_NonCanonical_Rejected()
-    {
-        Assert.True(Base64TestHelper.TryMakeNonCanonical(ValidPepper, out var nonCanonical));
-        AssertPepperRejected(nonCanonical);
-    }
-
-    [Fact]
-    public void Pepper_Canonical_Accepted()
-        => _ = new HmacRefreshTokenFactory(new RefreshTokenOptions { Pepper = ValidPepper });
+    // Note: the refresh-token factory no longer uses a Base64 pepper secret (verifier is
+    // SHA-256 of the raw token bytes), so CanonicalBase64Secret now guards only the JWT keys.
 }
