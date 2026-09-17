@@ -29,7 +29,7 @@ public sealed class AuthPrimitivesBoundaryTests
     }
 
     [Fact]
-    public void ApplicationAssembly_DoesNotReferenceIdentityModelOrJwtBearer()
+    public void ApplicationAssembly_DoesNotReferenceInfrastructureOnlyDependencies()
     {
         var referenced = typeof(JwtOptions).Assembly.GetReferencedAssemblies()
             .Select(a => a.Name ?? string.Empty)
@@ -37,6 +37,28 @@ public sealed class AuthPrimitivesBoundaryTests
 
         Assert.DoesNotContain(referenced, n => n.StartsWith("Microsoft.IdentityModel", StringComparison.Ordinal));
         Assert.DoesNotContain(referenced, n => n.Contains("JwtBearer", StringComparison.Ordinal));
+        Assert.DoesNotContain(referenced, n => n.Equals("Dapper", StringComparison.Ordinal));
+        Assert.DoesNotContain(referenced, n => n.StartsWith("MySqlConnector", StringComparison.Ordinal));
+        Assert.DoesNotContain(referenced, n => n.StartsWith("BitosX.Infrastructure", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SessionServices_HaveNoVaultMembers()
+    {
+        Type[] sessionTypes =
+        [
+            typeof(Sessions.LoginCommand), typeof(Sessions.LoginResult),
+            typeof(Sessions.RefreshCommand), typeof(Sessions.RefreshResult),
+        ];
+        foreach (var type in sessionTypes)
+        {
+            Assert.Equal("BitosX.Application", type.Assembly.GetName().Name);
+            foreach (var property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                Assert.DoesNotContain("vault", property.Name, StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("masterpassword", property.Name, StringComparison.OrdinalIgnoreCase);
+            }
+        }
     }
 
     [Fact]
