@@ -26,27 +26,9 @@ public sealed class HmacRefreshTokenFactory : IRefreshTokenFactory
 
     public HmacRefreshTokenFactory(RefreshTokenOptions options)
     {
-        if (string.IsNullOrWhiteSpace(options.Pepper))
-        {
-            throw new InvalidOperationException("Security:RefreshTokenPepper is required.");
-        }
-
-        byte[] key;
-        try
-        {
-            key = Convert.FromBase64String(options.Pepper);
-        }
-        catch (FormatException)
-        {
-            throw new InvalidOperationException("Security:RefreshTokenPepper must be Base64.");
-        }
-
-        if (key.Length < 32)
-        {
-            throw new InvalidOperationException("Security:RefreshTokenPepper must decode to at least 32 bytes.");
-        }
-
-        _pepperKey = key;
+        // Canonical standard Base64, no whitespace, ≥ 32 decoded bytes; fails closed otherwise.
+        // The decoded bytes are the long-lived HMAC key material (not the UTF-8 of the Base64 text).
+        _pepperKey = CanonicalBase64Secret.Decode(options.Pepper, "Security:RefreshTokenPepper", minBytes: 32);
     }
 
     public GeneratedRefreshToken Generate()

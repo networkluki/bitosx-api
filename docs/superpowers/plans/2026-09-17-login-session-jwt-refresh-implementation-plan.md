@@ -110,11 +110,14 @@ Runtime account is **database-level DML-only** (verified by `DatabasePrivilegeTe
   - `ISessionStore.CreateSessionOnLoginAsync(...)` performs the **post-Argon2 locked re-check + writes** in one transaction: `SELECT ... FOR UPDATE`, authoritative post-lock time, re-verify invariant **and that `password_hash` still equals the exact PHC string already verified**, then INSERT session + R0. It does **not** re-run Argon2.
 
 ### 3.3 New options (Decision 6 — names/values fixed)
+
+**Canonical Base64 secret representation (M-1, applies to `Security:JwtSigningKey`, `Security:JwtPreviousSigningKey`, `Security:RefreshTokenPepper`):** each is **canonical standard Base64** configuration text — standard Base64 alphabet, **no leading/trailing/embedded whitespace**, no alternate encoding — that **decodes to ≥ 32 bytes**; the key material is the **decoded bytes** (never a UTF-8 interpretation of the Base64 text). Validation is: reject null/blank → reject any whitespace → `Convert.FromBase64String` → require ≥ 32 decoded bytes → re-encode with `Convert.ToBase64String` and require exact `Ordinal` equality with the configured value → otherwise **fail closed** at composition. Values are **never trimmed or normalized**; malformed/non-canonical secret config is an operator error. (Implemented by the internal `CanonicalBase64Secret` parser in Infrastructure; `EmailVerificationPepper`/`EmailOutboxKey` are unchanged by this.)
+
 - `Security/JwtOptions`:
-  - **Secrets (flat):** `Security:JwtSigningKey` (current, base64, ≥32 bytes; **required when LoginEnabled**), optional `Security:JwtPreviousSigningKey`.
+  - **Secrets (flat):** `Security:JwtSigningKey` (current, canonical Base64 → ≥32 decoded bytes; **required when LoginEnabled**), optional `Security:JwtPreviousSigningKey` (same representation).
   - **Non-secret (nested `Security:Jwt:*`):** `Security:Jwt:Issuer` = `https://api.bitosx.se`, `Security:Jwt:Audience` = `bitosx-api`, `Security:Jwt:AccessTokenLifetimeSeconds` = `900`, `Security:Jwt:ClockSkewSeconds` = `60`, `Security:Jwt:KeyId` (current kid, e.g. `k1`; **required when LoginEnabled**, kid is mandatory — Q5), optional `Security:Jwt:PreviousKeyId`.
   - **Previous-key pairing / fail-closed composition:** `Security:JwtPreviousSigningKey` is optional **unless** `Security:Jwt:PreviousKeyId` is set — the two must be **present together**; a partial previous-key configuration (one without the other) **fails closed** at startup. The current key + current kid are required when LoginEnabled; a missing/short current key fails closed. Sign only with the current key; verification may temporarily accept current + previous during the documented rotation overlap (§8).
-- `Security/RefreshTokenOptions` — **secret** `Security:RefreshTokenPepper` (flat, unchanged); non-secret `IdleLifetime` (default 30d), `AbsoluteLifetime` (default 90d), `ReuseGraceWindow` (default 5s). **The pepper is a stable server secret — never silently rotated (§12.1).**
+- `Security/RefreshTokenOptions` — **secret** `Security:RefreshTokenPepper` (flat; **canonical Base64 → ≥32 decoded bytes**, per the representation above — the HMAC key is the decoded bytes, not the UTF-8 of the Base64 text; no whitespace/normalization; fails closed otherwise); non-secret `IdleLifetime` (default 30d), `AbsoluteLifetime` (default 90d), `ReuseGraceWindow` (default 5s). **The pepper is a stable server secret — never silently rotated (§12.1).**
 
 ### 3.4 New Application services
 - `Sessions/LoginService` (`ILoginService`) — orchestrates §9.
@@ -367,7 +370,7 @@ Token row states: **Active** (`consumed_at IS NULL ∧ revoked_at IS NULL ∧ ex
 - The **4 KiB body limit + 43-char length gate (§5.4)** apply to the refresh endpoint before parsing, capping parser work.
 
 ### 12.1 Refresh-token pepper stability (no silent rotation — approved directive)
-- `Security:RefreshTokenPepper` is a **stable server secret** for Phase 2. It is loaded once and **never silently rotated** at runtime.
+- `Security:RefreshTokenPepper` is a **stable server secret** for Phase 2, supplied as **canonical Base64 decoding to ≥ 32 bytes** (§3.3 representation; HMAC key = decoded bytes). It is loaded once and **never silently rotated** at runtime.
 - **Why:** `token_hash = HMAC-SHA256(pepper, rawBytes)` and lookup is by exact `token_hash`. Changing the pepper changes every verifier, so all existing refresh tokens would fail lookup at once (every session forced to re-login) unless a **previous-pepper verification overlap** is implemented (compute the candidate verifier under both current and previous peppers during a rollover window) — analogous to JWT previous-key overlap.
 - **Therefore:** pepper rotation is a **future, explicit, operator-initiated security operation** with its own overlap design — **not** an automatic Phase 2 feature. Documented here so no implementer treats the pepper as freely rotatable.
 

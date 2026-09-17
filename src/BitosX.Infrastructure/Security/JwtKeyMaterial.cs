@@ -54,28 +54,7 @@ internal sealed class JwtKeyMaterial
         return new JwtKeyMaterial(currentKey, options.KeyId, previousKey, previousKid);
     }
 
+    // Canonical standard Base64, no whitespace, ≥ 32 decoded bytes; fails closed otherwise.
     private static byte[] DecodeKey(string base64, string name)
-    {
-        if (string.IsNullOrWhiteSpace(base64))
-        {
-            throw new InvalidOperationException($"{name} is required.");
-        }
-
-        byte[] bytes;
-        try
-        {
-            bytes = Convert.FromBase64String(base64);
-        }
-        catch (FormatException)
-        {
-            throw new InvalidOperationException($"{name} must be Base64.");
-        }
-
-        if (bytes.Length < 32)
-        {
-            throw new InvalidOperationException($"{name} must decode to at least 32 bytes (HS256).");
-        }
-
-        return bytes;
-    }
+        => CanonicalBase64Secret.Decode(base64, name, minBytes: 32);
 }

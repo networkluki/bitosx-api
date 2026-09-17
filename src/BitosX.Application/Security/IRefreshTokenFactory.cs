@@ -3,7 +3,12 @@ namespace BitosX.Application.Security;
 /// <summary>A freshly generated opaque refresh token and its stored verifier.</summary>
 /// <param name="TokenBase64Url">The 256-bit token, unpadded URL-safe Base64 (43 chars). Returned to the caller; never persisted.</param>
 /// <param name="Verifier">HMAC-SHA256(pepper, raw token bytes) — 32 bytes; the only thing persisted.</param>
-public sealed record GeneratedRefreshToken(string TokenBase64Url, byte[] Verifier);
+public sealed record GeneratedRefreshToken(string TokenBase64Url, byte[] Verifier)
+{
+    /// <summary>Redacts both the plaintext token and the verifier so neither can leak via ToString.</summary>
+    public override string ToString()
+        => "GeneratedRefreshToken { TokenBase64Url = <redacted>, Verifier = <redacted> }";
+}
 
 /// <summary>
 /// Generates 256-bit opaque refresh tokens and computes their peppered HMAC verifier.

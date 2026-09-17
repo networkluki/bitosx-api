@@ -4,7 +4,12 @@ namespace BitosX.Application.Security;
 /// <param name="Token">The signed compact JWT string (returned to the caller; never persisted, never logged).</param>
 /// <param name="ExpiresAt">UTC expiry (issued-at + configured lifetime).</param>
 /// <param name="Jti">The token's unique id claim value.</param>
-public sealed record AccessToken(string Token, DateTime ExpiresAt, Guid Jti);
+public sealed record AccessToken(string Token, DateTime ExpiresAt, Guid Jti)
+{
+    /// <summary>Redacts the JWT so a stray log/interpolation of this object never leaks the token.</summary>
+    public override string ToString()
+        => $"AccessToken {{ Token = <redacted>, ExpiresAt = {ExpiresAt:O}, Jti = {Jti} }}";
+}
 
 /// <summary>
 /// Issues access JWTs. <b>Issuance-only</b> — request-path validation is owned by
