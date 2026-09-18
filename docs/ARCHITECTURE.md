@@ -141,7 +141,9 @@ DI `AccountCapabilities` singleton (never re-derived in endpoints):
   persistence field leaks into the contract. Public-exposure hardening (`Security:PublicExposureHardening`,
   Phase 2D.1) layers process-local token-bucket rate limiting on the unauthenticated `login`/`refresh`
   endpoints as endpoint filters (per-IP + per-normalized-email for login, per-IP for refresh; generic 429,
-  memory-bounded partitions); the client IP comes only from the loopback-trusted `UseForwardedHeaders`
+  memory-bounded partitions where a live limiter is never evicted for capacity — a new key fails closed
+  with 503 when the cache is full and nothing is idle, so partition churn cannot reset a limiter); the
+  client IP comes only from the loopback-trusted `UseForwardedHeaders`
   result and fails closed (503) when unresolvable. Inert unless enabled; the Argon2 queue / global login
   budget / jitter (2D.2) and OpenAPI/origin gating (2D.3) are later slices.
 - **EmailVerification** (`AddBitosxEmailVerification`): register/verify/resend services,

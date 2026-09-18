@@ -5,10 +5,18 @@ namespace BitosX.Api.Security;
 
 /// <summary>
 /// A process-local, memory-bounded cache of per-partition <see cref="TokenBucketRateLimiter"/> instances
-/// (one per client-IP or per-email-hash key). Enforces a hard maximum partition count with LRU eviction
-/// and periodic idle expiration so a flood of unique keys cannot grow application memory without bound.
+/// (one per client-IP or per-email-hash key).
+///
+/// <para><b>Security invariant:</b> <see cref="_maxPartitions"/> is a memory-safety boundary, NOT a
+/// licence to reset live rate-limit state. A limiter that has not been idle for at least
+/// <see cref="_idleExpiration"/> is NEVER evicted merely because unrelated partition keys arrive. When a
+/// NEW key arrives and the cache is full, only entries already past the idle threshold may be reclaimed;
+/// if none are eligible the new key is refused (<see cref="TryAcquire"/> returns false → the caller fails
+/// closed with 503). Existing partitions always keep their limiter, even at capacity. This makes
+/// partition churn (flooding many distinct IPs/emails) unable to reset an exhausted limiter.</para>
+///
 /// Rate limiting here is single-instance/process-local; a multi-instance deployment needs a separately
-/// designed distributed limiter. Never stores or logs the raw partition value beyond the caller's key.
+/// designed distributed limiter. The raw partition value is never stored or logged beyond the caller's key.
 /// </summary>
 public sealed class BoundedRateLimiterCache : IDisposable
 {
@@ -40,31 +48,52 @@ public sealed class BoundedRateLimiterCache : IDisposable
     /// <summary>Current tracked partition count (for tests / diagnostics — never the keys themselves).</summary>
     public int PartitionCount => _partitions.Count;
 
-    /// <summary>Attempts to take one token from the partition's bucket. QueueLimit is 0, so it never queues.</summary>
-    public RateLimitLease AttemptAcquire(string partitionKey)
+    /// <summary>
+    /// Attempts to take one token from the partition's bucket.
+    /// Returns false ONLY when the partition is new, the cache is at its maximum, and no entry is idle
+    /// enough to reclaim — i.e. capacity exhaustion (the caller fails closed with 503). Returns true with
+    /// a lease otherwise; <c>lease.IsAcquired</c> then carries the ordinary rate-limit decision. An
+    /// existing partition always resolves (true), even when the cache is full. QueueLimit is 0 → never queues.
+    /// </summary>
+    public bool TryAcquire(string partitionKey, out RateLimitLease lease)
     {
-        var entry = GetOrAddEntry(partitionKey);
+        if (!TryGetOrAddEntry(partitionKey, out var entry))
+        {
+            lease = FailedLease.Instance; // capacity exhausted; caller must not treat this as a rate-limit lease
+            return false;
+        }
+
         Volatile.Write(ref entry.LastAccessTicks, _clock.GetUtcNow().UtcTicks);
-        return entry.Limiter.AttemptAcquire(1);
+        lease = entry.Limiter.AttemptAcquire(1);
+        return true;
     }
 
-    private Entry GetOrAddEntry(string key)
+    private bool TryGetOrAddEntry(string key, out Entry entry)
     {
-        if (_partitions.TryGetValue(key, out var existing))
+        // Fast path: an existing partition ALWAYS resolves and is never evicted for capacity.
+        if (_partitions.TryGetValue(key, out var found))
         {
-            return existing;
+            entry = found;
+            return true;
         }
 
         lock (_mutationLock)
         {
-            if (_partitions.TryGetValue(key, out existing))
+            if (_partitions.TryGetValue(key, out found))
             {
-                return existing;
+                entry = found;
+                return true;
             }
 
             if (_partitions.Count >= _maxPartitions)
             {
-                EvictLeastRecentlyUsedLocked();
+                // Reclaim ONLY idle-eligible entries; a live (non-idle) limiter is never sacrificed.
+                ReclaimIdleLocked();
+                if (_partitions.Count >= _maxPartitions)
+                {
+                    entry = null!;
+                    return false; // full and nothing idle → refuse the new key (fail closed)
+                }
             }
 
             var created = new Entry
@@ -80,28 +109,22 @@ public sealed class BoundedRateLimiterCache : IDisposable
                 }),
                 LastAccessTicks = _clock.GetUtcNow().UtcTicks,
             };
-            _partitions[key] = created;
-            return created;
+            _partitions[key] = created; // only ever added under the lock, after a capacity check → count never exceeds max
+            entry = created;
+            return true;
         }
     }
 
-    private void EvictLeastRecentlyUsedLocked()
+    /// <summary>Removes every entry that has been idle for at least the configured idle expiration.</summary>
+    private void ReclaimIdleLocked()
     {
-        string? lruKey = null;
-        var oldest = long.MaxValue;
+        var cutoff = _clock.GetUtcNow().UtcTicks - _idleExpiration.Ticks;
         foreach (var kv in _partitions)
         {
-            var last = Volatile.Read(ref kv.Value.LastAccessTicks);
-            if (last < oldest)
+            if (Volatile.Read(ref kv.Value.LastAccessTicks) <= cutoff && _partitions.TryRemove(kv.Key, out var removed))
             {
-                oldest = last;
-                lruKey = kv.Key;
+                removed.Limiter.Dispose();
             }
-        }
-
-        if (lruKey is not null && _partitions.TryRemove(lruKey, out var removed))
-        {
-            removed.Limiter.Dispose();
         }
     }
 
@@ -112,14 +135,8 @@ public sealed class BoundedRateLimiterCache : IDisposable
             return;
         }
 
-        var cutoff = _clock.GetUtcNow().UtcTicks - _idleExpiration.Ticks;
-        foreach (var kv in _partitions)
-        {
-            if (Volatile.Read(ref kv.Value.LastAccessTicks) < cutoff && _partitions.TryRemove(kv.Key, out var removed))
-            {
-                removed.Limiter.Dispose();
-            }
-        }
+        // Removal-only; safe without the mutation lock (adds happen only under the lock).
+        ReclaimIdleLocked();
     }
 
     public void Dispose()
@@ -132,5 +149,14 @@ public sealed class BoundedRateLimiterCache : IDisposable
         }
 
         _partitions.Clear();
+    }
+
+    /// <summary>A never-acquired lease returned when capacity is exhausted (distinct from a rate-limit rejection).</summary>
+    private sealed class FailedLease : RateLimitLease
+    {
+        public static readonly FailedLease Instance = new();
+        public override bool IsAcquired => false;
+        public override IEnumerable<string> MetadataNames => [];
+        public override bool TryGetMetadata(string metadataName, out object? metadata) { metadata = null; return false; }
     }
 }

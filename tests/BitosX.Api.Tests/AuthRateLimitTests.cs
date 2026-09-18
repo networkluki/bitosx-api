@@ -202,6 +202,77 @@ public sealed class AuthRateLimitTests : IClassFixture<HardenedAuthApiFactory>, 
         Assert.NotEqual(tokens.RefreshToken, rotated.RefreshToken);
     }
 
+    // ---- partition-cache capacity: fail closed, never reset a live limiter ----
+
+    private static async Task<HttpResponseMessage> LoginFrom(HardenedAuthApiFactory f, string email, string? xff, string peer = "127.0.0.1")
+        => await HardenedAuthApiFactory.SendAsync(f.CreateClient(), HttpMethod.Post, "/v1/auth/login", new { email, password = ValidPassword }, peer, xff);
+
+    [Fact]
+    public async Task IpPartitionCapacityExhaustion_FailsClosed503_Generic_NoLiveReset()
+    {
+        using var factory = new HardenedAuthApiFactory();
+        factory.Overrides["Security:PublicExposureHardening:PartitionState:MaxIpPartitions"] = "2";
+        await factory.ResetDatabaseAsync();
+
+        var ip1 = ClientIp();
+        var ip2 = ClientIp();
+        var ip3 = ClientIp();
+
+        Assert.NotEqual(HttpStatusCode.ServiceUnavailable, (await LoginFrom(factory, Email(), ip1)).StatusCode);
+        Assert.NotEqual(HttpStatusCode.ServiceUnavailable, (await LoginFrom(factory, Email(), ip2)).StatusCode);
+
+        // Cache full (ip1, ip2 both non-idle) → a new IP fails closed with a generic 503.
+        var overflow = await LoginFrom(factory, Email(), ip3);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, overflow.StatusCode);
+
+        var raw = await overflow.Content.ReadAsStringAsync();
+        using var body = JsonDocument.Parse(raw);
+        Assert.Equal("Service unavailable", body.RootElement.GetProperty("title").GetString());
+        Assert.DoesNotContain(ip3, raw, StringComparison.Ordinal); // no partition/IP disclosure
+
+        // An existing IP still resolves against its own (live) limiter — not evicted to admit ip3.
+        Assert.NotEqual(HttpStatusCode.ServiceUnavailable, (await LoginFrom(factory, Email(), ip1)).StatusCode);
+    }
+
+    [Fact]
+    public async Task IpPartitionChurn_CannotResetExhaustedIpLimiter()
+    {
+        using var factory = new HardenedAuthApiFactory();
+        factory.Overrides["Security:PublicExposureHardening:PartitionState:MaxIpPartitions"] = "2";
+        await factory.ResetDatabaseAsync();
+
+        var ipA = ClientIp();
+        for (var i = 0; i < 10; i++) await LoginFrom(factory, Email(), ipA); // exhaust ipA per-IP (limit 10)
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await LoginFrom(factory, Email(), ipA)).StatusCode);
+
+        // Churn: fill the remaining slot, then hammer new IPs (which fail closed) to try to evict ipA.
+        await LoginFrom(factory, Email(), ClientIp());
+        for (var i = 0; i < 5; i++) await LoginFrom(factory, Email(), ClientIp());
+
+        // ipA is still exhausted — churn did not reset it.
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await LoginFrom(factory, Email(), ipA)).StatusCode);
+    }
+
+    [Fact]
+    public async Task EmailPartitionChurn_CannotResetExhaustedEmailLimiter()
+    {
+        using var factory = new HardenedAuthApiFactory();
+        factory.Overrides["Security:PublicExposureHardening:PartitionState:MaxEmailPartitions"] = "2";
+        await factory.ResetDatabaseAsync();
+
+        var ip = ClientIp();               // single IP (per-IP limit 10 is not the binding constraint)
+        var emailA = Email();
+        for (var i = 0; i < 5; i++) await LoginFrom(factory, emailA, ip); // exhaust emailA per-email (limit 5)
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await LoginFrom(factory, emailA, ip)).StatusCode);
+
+        // Churn distinct emails to try to evict emailA's partition (fills slot 2, then fails closed).
+        await LoginFrom(factory, Email(), ip);
+        await LoginFrom(factory, Email(), ip);
+
+        // emailA still exhausted — churn did not reset it.
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await LoginFrom(factory, emailA, ip)).StatusCode);
+    }
+
     // ---- replenishment (short period override; brief real wait, not multi-minute) ----
 
     [Fact]

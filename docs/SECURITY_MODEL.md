@@ -245,8 +245,15 @@ existing and unknown accounts, enforced before credential evaluation), and `POST
 Rejection is a generic **429** (`title: Too Many Requests`, `detail: Too many requests. Try again later.`,
 plus `Retry-After` when available) that never reveals which limiter fired or any account/email/IP/token
 value; partition keys are never logged. Partition state is memory-bounded (≤4096 IP and ≤4096 email
-partitions, 30-min idle expiration, LRU eviction). A limiter/IP-resolution failure fails closed (503),
-never falling through to unrestricted auth or a credential 401.
+partitions, 30-min idle expiration). **`MaxPartitions` is a memory-safety boundary, not a reset lever:**
+a live (non-idle) limiter is **never** evicted to make room, so partition churn (flooding many distinct
+IPs/emails) cannot reset an exhausted limiter. Only entries already past the idle-expiration threshold are
+reclaimable (LRU applies solely among those). When the cache is full and no entry is idle-eligible, a
+**new** partition fails closed with a generic **503** (existing partitions always keep their limiter);
+capacity is never mapped to a `"overflow"`/`"unknown"` bucket, a credential 401, or unrestricted
+execution. Inserts happen only under a lock after a capacity check, so the maximum is never exceeded under
+concurrency. A limiter/IP-resolution failure likewise fails closed (503), never falling through to
+unrestricted auth.
 
 **Deferred:** bounded Argon2 work queue + process-wide login budget + response jitter (**2D.2**);
 OpenAPI/public-exposure gating + Apache/Cloudflare origin review (**2D.3**); adaptive Turnstile/CAPTCHA

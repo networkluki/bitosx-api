@@ -85,8 +85,17 @@ public static class AuthRateLimiting
         }
 
         var limiters = http.RequestServices.GetRequiredService<AuthRateLimiters>();
-        using var lease = select(limiters).AttemptAcquire(ipKey);
-        return lease.IsAcquired ? await next(context) : TooManyRequests(http, lease);
+        // Capacity exhaustion (new key, cache full, nothing idle) fails closed with 503 — never a shared
+        // bucket and never a reset of an existing live limiter.
+        if (!select(limiters).TryAcquire(ipKey, out var lease))
+        {
+            return ServiceUnavailable();
+        }
+
+        using (lease)
+        {
+            return lease.IsAcquired ? await next(context) : TooManyRequests(http, lease);
+        }
     }
 
     /// <summary>
@@ -116,8 +125,15 @@ public static class AuthRateLimiting
         var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)));
 
         var limiters = http.RequestServices.GetRequiredService<AuthRateLimiters>();
-        using var lease = limiters.LoginPerEmail.AttemptAcquire(key);
-        return lease.IsAcquired ? await next(context) : TooManyRequests(http, lease);
+        if (!limiters.LoginPerEmail.TryAcquire(key, out var lease))
+        {
+            return ServiceUnavailable();
+        }
+
+        using (lease)
+        {
+            return lease.IsAcquired ? await next(context) : TooManyRequests(http, lease);
+        }
     }
 
     // ---- generic rejection contracts (no limiter/account/IP/token disclosure) ----
