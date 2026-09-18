@@ -7,8 +7,10 @@ namespace BitosX.Application.Sessions;
 /// </summary>
 public sealed record LoginCommand(string Email, string Password, string? UserAgent = null)
 {
-    /// <summary>Redacts the account password so a stray log/interpolation cannot leak it.</summary>
-    public override string ToString() => $"LoginCommand {{ Email = {Email}, Password = <redacted>, UserAgent = {UserAgent} }}";
+    /// <summary>Redacts the account password AND the (account-identifying) email so a stray
+    /// log/interpolation of this command leaks neither (INFO-1). UserAgent is a non-sensitive
+    /// client descriptor and may remain visible.</summary>
+    public override string ToString() => $"LoginCommand {{ Email = <redacted>, Password = <redacted>, UserAgent = {UserAgent} }}";
 }
 
 /// <summary>Coarse login outcome — no reason detail is exposed (anti-enumeration).</summary>

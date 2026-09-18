@@ -320,10 +320,11 @@ public sealed class LoginServiceTests
     }
 
     [Fact]
-    public void LoginCommand_ToString_RedactsPassword()
+    public void LoginCommand_ToString_RedactsPasswordAndEmail()
     {
-        var s = new LoginCommand("user@example.com", "super-secret-pw").ToString();
+        var s = new LoginCommand("secret.person@example.com", "super-secret-pw").ToString();
         Assert.DoesNotContain("super-secret-pw", s, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret.person@example.com", s, StringComparison.Ordinal); // INFO-1: email redacted too
         Assert.Contains("<redacted>", s, StringComparison.Ordinal);
     }
 }
