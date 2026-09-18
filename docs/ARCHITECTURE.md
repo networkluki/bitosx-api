@@ -111,12 +111,22 @@ account/auth behavior yet). Details in [`PERSISTENCE.md`](PERSISTENCE.md).
 
 ### Capability-based composition
 
-The account subsystem composes as three independent capabilities, detected once at
+The account subsystem composes as four independent capabilities, detected once at
 startup (`AccountsServiceCollectionExtensions.DetectCapabilities`) and exposed via a
 DI `AccountCapabilities` singleton (never re-derived in endpoints):
-- **AccountCore** (`AddBitosxAccountCore`): DB + Argon2id password hashing (+ future
-  login/session/JWT). **Independent of SMTP.** Enabled when the runtime connection
-  string is configured.
+- **AccountCore** (`AddBitosxAccountCore`): DB + Argon2id password hashing.
+  **Independent of SMTP.** Enabled when the runtime connection string is configured.
+  Stays clean — it registers Argon2 only, no JWT/session wiring.
+- **Login** (`AddBitosxLogin`): access-JWT issuance, the single validation-parameters
+  source, the SHA-256 refresh-token factory, the session store, and the login / refresh /
+  session-management / session-authentication application services. An **independent**
+  capability layered on AccountCore, gated **only** on the current JWT signing key
+  (`Security:JwtSigningKey` + mandatory `Security:Jwt:KeyId`). **Requires neither SMTP,
+  EmailVerification, nor any refresh-token secret** — the refresh verifier is
+  `SHA-256(raw 32 token bytes)` with no server pepper. Tokens are signed with the current
+  key only and validated against current **+** previous (verification-only) during rotation.
+  ASP.NET Core JwtBearer / `UseAuthentication` / `/account/me` HTTP wiring is deferred to
+  Phase 2B and consumes exactly the one `JwtTokenValidationParametersFactory`.
 - **EmailVerification** (`AddBitosxEmailVerification`): register/verify/resend services,
   token factory, outbox payload crypto, and outbox persistence. Enabled when the
   verification pepper **and** outbox key are configured. Verifying an already-issued
@@ -128,8 +138,13 @@ DI `AccountCapabilities` singleton (never re-derived in endpoints):
 Presence vs. malformed: an optional capability whose secrets are **absent** is simply
 disabled (the API still starts). A capability whose secrets are **present but malformed**
 fails closed at startup (throws) — e.g. an invalid `EmailOutboxKey`, a non-587 SMTP
-port, a **partial verification config** (only one of pepper/outbox key set), or an
-explicitly-enabled delivery (SMTP app password present) with missing username/FromAddress. When EmailVerification is enabled but EmailDelivery is not, `register` and
+port, a **partial verification config** (only one of pepper/outbox key set), an
+explicitly-enabled delivery (SMTP app password present) with missing username/FromAddress,
+or **malformed login config** (a short/non-canonical signing key, a missing `kid`, a blank
+issuer/audience, an orphan previous signing key, or a non-positive/oversized refresh
+lifetime — M-2 is enforced once at composition). `AddBitosxLogin` reuses the same single
+validation path as detection, so it can never register a half-working login stack even if
+called directly. When EmailVerification is enabled but EmailDelivery is not, `register` and
 `resend-verification` return a generic **503** (routes stay mapped; nothing is enqueued),
 while `verify-email` remains available. Capability booleans are logged at startup but are
 **not** exposed on the public `/health` endpoint.

@@ -185,6 +185,42 @@ identifier and does not log headers or bodies.
   generic failures. Timing resistance is **best-effort** (SMTP off the request path;
   no dummy hashing in register) — mandatory rate limiting precedes public exposure.
 
+## Login, sessions, access + refresh tokens
+
+- **Login is an independent capability** (`AddBitosxLogin`), layered on AccountCore and
+  gated **only** on the current JWT signing key (`Security:JwtSigningKey` + mandatory
+  `Security:Jwt:KeyId`). It requires **neither SMTP nor EmailVerification nor any
+  refresh-token secret**. Non-secret JWT metadata alone never enables it.
+- **Access token:** HS256 JWT with a **mandatory `kid`**, minimal claims (`sub`, `sid`,
+  `jti`, `iat`, `nbf`, `exp`, `iss`, `aud`) — never email/phone/role/vault data. Issued
+  and signed with the **current key only**; validated against **current + previous**
+  (verification-only) during the rotation overlap, via the single
+  `JwtTokenValidationParametersFactory` (HS256 only, exact issuer/audience, explicit clock
+  skew, mandatory-kid resolution with no all-keys fallback). Phase 2B's JwtBearer consumes
+  exactly those parameters — there is never a second validator.
+- **Refresh token:** 256-bit CSPRNG, transmitted as 43-char unpadded Base64URL. The DB
+  stores only the verifier `token_hash = SHA-256(raw 32 token bytes)` (`VARBINARY(32)`) —
+  **no server pepper and no HMAC** (the token is already 256 bits of entropy, so a plain
+  SHA-256 verifier makes offline preimage recovery infeasible). The plaintext token never
+  reaches the store; verifier byte arrays are best-effort zeroed.
+- **Strict rotation / reuse:** rotation is atomic under the canonical lock order
+  (accounts → sessions → refresh_tokens) with authoritative post-lock time. There is
+  **no reuse grace window**: any presentation of an already consumed/revoked token is
+  treated as reuse and revokes the whole session (session-scoped); clients must
+  single-flight refresh requests. Store `Invalid` and `ReuseDetected` both collapse to a
+  single generic failure to callers.
+- **Session lifetimes** (`RefreshTokenOptions`, no secret): idle (default 30 d) and
+  absolute (default 90 d). Both are validated **once at composition (M-2)** to be positive
+  and arithmetically safe for session-expiry math, so a malformed/oversized lifetime fails
+  at startup — never on a user request. Session listing exposes the **effective** expiry
+  `min(absolute, last_seen + idle)` and lists only currently-usable sessions.
+- **Fail-closed config:** `AddBitosxLogin` and `DetectCapabilities` share one validation
+  path, so malformed login config (short/non-canonical key, missing/duplicate `kid`, orphan
+  previous key, blank issuer/audience, non-positive/oversized lifetimes) throws at startup
+  and never registers a half-working login stack. Signing keys are Base64 secrets held only
+  in the secret store; `JwtOptions` carries no secret-revealing `ToString`. `UseAuthentication`
+  / JwtBearer / `/account/me` HTTP wiring is **deferred to Phase 2B**.
+
 ## Rate limiting (production blocker for account endpoints)
 Per-IP + per-email limits on `/register`, stricter limits + min-interval + daily cap on
 `/resend-verification`, per-IP + backoff on `/verify-email`, a global outbound-email
