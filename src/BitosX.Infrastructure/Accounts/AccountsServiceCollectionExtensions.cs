@@ -77,12 +77,131 @@ public static class AccountsServiceCollectionExtensions
             delivery = true;
         }
 
+        // Login: an independent AccountCore-backed capability, gated ONLY on the current JWT signing
+        // key (Security:JwtSigningKey). No refresh-token secret is involved. Non-secret JWT metadata
+        // alone never enables Login. A previous signing secret without a current one is malformed.
+        var jwtKeySet = !string.IsNullOrWhiteSpace(configuration["Security:JwtSigningKey"]);
+        var previousKeySet = !string.IsNullOrWhiteSpace(configuration["Security:JwtPreviousSigningKey"]);
+        bool login;
+        if (jwtKeySet)
+        {
+            _ = BuildValidatedLoginConfiguration(configuration); // fail closed on any invalid login/JWT/refresh config
+            login = true;
+        }
+        else if (previousKeySet)
+        {
+            throw new InvalidOperationException(
+                "Security:JwtPreviousSigningKey is set without Security:JwtSigningKey (orphan previous signing key).");
+        }
+        else
+        {
+            login = false;
+        }
+
         return new AccountCapabilities
         {
             AccountCoreEnabled = true,
             EmailVerificationEnabled = verification,
             EmailDeliveryEnabled = delivery,
+            LoginEnabled = login,
         };
+    }
+
+    // ---- Shared login configuration validation (used by DetectCapabilities AND AddBitosxLogin) ----
+
+    /// <summary>
+    /// Binds and fully validates the Login/JWT/refresh configuration, failing closed on any problem.
+    /// This is the SINGLE validation path both composition entry points reuse. Returns validated
+    /// option objects; never stores secrets in capabilities and never echoes key material in errors.
+    /// </summary>
+    private static (JwtOptions Jwt, RefreshTokenOptions Refresh) BuildValidatedLoginConfiguration(IConfiguration configuration)
+    {
+        var jwt = new JwtOptions
+        {
+            SigningKey = configuration["Security:JwtSigningKey"] ?? string.Empty,
+            KeyId = configuration["Security:Jwt:KeyId"] ?? string.Empty,
+            PreviousSigningKey = configuration["Security:JwtPreviousSigningKey"],
+            PreviousKeyId = configuration["Security:Jwt:PreviousKeyId"],
+        };
+        if (configuration["Security:Jwt:Issuer"] is { } issuer) jwt.Issuer = issuer;
+        if (configuration["Security:Jwt:Audience"] is { } audience) jwt.Audience = audience;
+
+        var lifetimeSeconds = configuration.GetValue<long?>("Security:Jwt:AccessTokenLifetimeSeconds");
+        if (lifetimeSeconds is not null)
+        {
+            if (lifetimeSeconds <= 0) throw new InvalidOperationException("Security:Jwt:AccessTokenLifetimeSeconds must be a positive number of seconds.");
+            jwt.AccessTokenLifetime = SecondsToTimeSpan(lifetimeSeconds.Value, "Security:Jwt:AccessTokenLifetimeSeconds");
+        }
+
+        var skewSeconds = configuration.GetValue<long?>("Security:Jwt:ClockSkewSeconds");
+        if (skewSeconds is not null)
+        {
+            if (skewSeconds < 0) throw new InvalidOperationException("Security:Jwt:ClockSkewSeconds must be zero or a positive number of seconds.");
+            jwt.ClockSkew = SecondsToTimeSpan(skewSeconds.Value, "Security:Jwt:ClockSkewSeconds");
+        }
+
+        // Non-key JWT policy (HS256 is fixed in the primitives; issuer/audience/lifetime/skew here).
+        if (string.IsNullOrWhiteSpace(jwt.Issuer)) throw new InvalidOperationException("Security:Jwt:Issuer must be non-blank when Login is enabled.");
+        if (string.IsNullOrWhiteSpace(jwt.Audience)) throw new InvalidOperationException("Security:Jwt:Audience must be non-blank when Login is enabled.");
+        if (jwt.AccessTokenLifetime <= TimeSpan.Zero) throw new InvalidOperationException("Security:Jwt:AccessTokenLifetimeSeconds must be positive.");
+        if (jwt.ClockSkew < TimeSpan.Zero) throw new InvalidOperationException("Security:Jwt:ClockSkewSeconds must not be negative.");
+
+        // Key material: current key canonical Base64 >= 32 bytes, mandatory current kid, previous
+        // pair both-or-neither, previous key >= 32 bytes. Reuse the single existing key validator.
+        _ = JwtKeyMaterial.FromOptions(jwt);
+
+        // Current and previous kid must differ (a shared kid makes verification-key resolution ambiguous).
+        if (!string.IsNullOrWhiteSpace(jwt.PreviousKeyId) && string.Equals(jwt.KeyId, jwt.PreviousKeyId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Security:Jwt:KeyId and Security:Jwt:PreviousKeyId must differ.");
+        }
+
+        // RefreshTokenOptions (no secret; M-2 lifetime validation enforced here at composition).
+        var refresh = new RefreshTokenOptions();
+        var idleSeconds = configuration.GetValue<long?>("Security:RefreshToken:IdleLifetimeSeconds");
+        if (idleSeconds is not null) refresh.IdleLifetime = SecondsToTimeSpan(idleSeconds.Value, "Security:RefreshToken:IdleLifetimeSeconds");
+        var absoluteSeconds = configuration.GetValue<long?>("Security:RefreshToken:AbsoluteLifetimeSeconds");
+        if (absoluteSeconds is not null) refresh.AbsoluteLifetime = SecondsToTimeSpan(absoluteSeconds.Value, "Security:RefreshToken:AbsoluteLifetimeSeconds");
+        ValidateRefreshLifetimes(refresh);
+
+        return (jwt, refresh);
+    }
+
+    private static TimeSpan SecondsToTimeSpan(long seconds, string configKey)
+    {
+        try
+        {
+            return TimeSpan.FromSeconds(seconds);
+        }
+        catch (OverflowException)
+        {
+            throw new InvalidOperationException($"{configKey} is too large to represent.");
+        }
+        catch (ArgumentException)
+        {
+            throw new InvalidOperationException($"{configKey} is out of range.");
+        }
+    }
+
+    /// <summary>
+    /// M-2: refresh lifetimes must be positive AND arithmetically safe for the normal session-expiry
+    /// calculations (now ± lifetime, last_seen + idle) using one composition-time reference now — so a
+    /// malformed/huge lifetime fails at startup, never on a user request.
+    /// </summary>
+    private static void ValidateRefreshLifetimes(RefreshTokenOptions options)
+    {
+        if (options.IdleLifetime <= TimeSpan.Zero) throw new InvalidOperationException("Security:RefreshToken:IdleLifetimeSeconds must be positive.");
+        if (options.AbsoluteLifetime <= TimeSpan.Zero) throw new InvalidOperationException("Security:RefreshToken:AbsoluteLifetimeSeconds must be positive.");
+
+        var now = DateTime.UtcNow;
+        var maxForward = DateTime.MaxValue - now;   // headroom for now + lifetime / last_seen + idle
+        var maxBackward = now - DateTime.MinValue;  // headroom for now - idle
+        if (options.AbsoluteLifetime > maxForward
+            || options.IdleLifetime > maxForward
+            || options.IdleLifetime > maxBackward)
+        {
+            throw new InvalidOperationException("RefreshToken lifetimes are too large to be represented safely in session-expiry calculations.");
+        }
     }
 
     /// <summary>Validates SMTP config when delivery is explicitly enabled (app password present).</summary>
