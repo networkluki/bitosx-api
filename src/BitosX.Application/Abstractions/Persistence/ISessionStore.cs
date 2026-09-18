@@ -96,8 +96,22 @@ public sealed record RefreshRotationResult
 }
 
 /// <summary>
-/// Persistence for authenticated sessions. This checkpoint exposes atomic login session-create and
-/// strict refresh rotation/reuse; logout, listing, and auth-lookup are added in later checkpoints.
+/// Read-only authoritative session/account state for the per-request authorization check. Contains
+/// no email/password/phone/user-agent/refresh-verifier/vault data — only what the authenticator
+/// needs to decide validity. The authoritative owner is <see cref="AccountId"/> (discovered by the
+/// lookup, never supplied by the caller) so a mismatched JWT <c>sub</c> can be detected.
+/// </summary>
+public sealed record SessionAuthState(
+    Guid SessionId,
+    Guid AccountId,
+    DateTime LastSeenAt,
+    DateTime AbsoluteExpiresAt,
+    DateTime? RevokedAt,
+    DateTime? AccountDisabledAt);
+
+/// <summary>
+/// Persistence for authenticated sessions: atomic login session-create, strict refresh
+/// rotation/reuse, the read-only per-request auth-state lookup, and session revocation/management.
 /// </summary>
 public interface ISessionStore
 {
@@ -124,4 +138,11 @@ public interface ISessionStore
     Task<RefreshRotationResult> RotateAsync(
         RefreshRotationRequest request,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// READ-ONLY authoritative lookup of session + account state by session id (no lock, no write).
+    /// Returns null when the session does not exist. Ordinary "session not found / invalid state" is
+    /// NOT an exception. Used by <c>SessionAuthenticator</c> for per-request authorization.
+    /// </summary>
+    Task<SessionAuthState?> GetSessionAuthStateAsync(Guid sessionId, CancellationToken cancellationToken = default);
 }

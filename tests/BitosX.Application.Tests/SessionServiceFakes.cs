@@ -121,4 +121,18 @@ internal sealed class FakeSessionStore : ISessionStore
         if (RotateThrows is not null) throw RotateThrows;
         return Task.FromResult(RotateResult);
     }
+
+    public SessionAuthState? AuthState { get; set; }
+    public Exception? AuthStateThrows { get; set; }
+    public int GetAuthStateCalls { get; private set; }
+    public Guid LastAuthStateSessionId { get; private set; }
+
+    public Task<SessionAuthState?> GetSessionAuthStateAsync(Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        GetAuthStateCalls++;
+        LastAuthStateSessionId = sessionId;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (AuthStateThrows is not null) throw AuthStateThrows;
+        return Task.FromResult(AuthState);
+    }
 }

@@ -282,4 +282,20 @@ public sealed class SessionStore : ISessionStore
             CryptographicOperations.ZeroMemory(next);
         }
     }
+
+    public async Task<SessionAuthState?> GetSessionAuthStateAsync(Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        // READ-ONLY, no lock. Discovers the authoritative owner (account_id) so a mismatched JWT sub
+        // can be detected by the caller. Carries no email/password/phone/user-agent/verifier.
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        return await connection.QuerySingleOrDefaultAsync<SessionAuthState>(new CommandDefinition(
+            """
+            SELECT s.id AS SessionId, s.account_id AS AccountId, s.last_seen_at AS LastSeenAt,
+                   s.absolute_expires_at AS AbsoluteExpiresAt, s.revoked_at AS RevokedAt, a.disabled_at AS AccountDisabledAt
+            FROM sessions s
+            JOIN accounts a ON a.id = s.account_id
+            WHERE s.id = @sessionId
+            LIMIT 1;
+            """, new { sessionId }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+    }
 }
