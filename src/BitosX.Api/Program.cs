@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using BitosX.Api.Auth;
 using BitosX.Api.Endpoints;
 using BitosX.Api.Http;
+using BitosX.Api.Security;
 using BitosX.Application.Versioning;
 using BitosX.Infrastructure.Accounts;
 using BitosX.Infrastructure.Persistence;
@@ -38,17 +39,18 @@ builder.Services.AddProblemDetails();
 // ---- OpenAPI document (served at /openapi/v1.json) ----
 builder.Services.AddOpenApi();
 
-// ---- Forwarded headers: trust ONLY the local Apache reverse proxy ----
-// The future path is Cloudflare -> Apache -> Kestrel (loopback). Kestrel must
-// never trust forwarded headers from arbitrary networks.
+// ---- Forwarded headers: trust ONLY the local Apache reverse proxy (Phase 2D.1 client-IP model) ----
+// Production path is Cloudflare -> Apache -> Kestrel (loopback); Apache establishes the Cloudflare
+// trust boundary and normalizes the client address before proxying over loopback. Kestrel processes
+// exactly one hop of X-Forwarded-For/-Proto and trusts only the loopback proxy, so an incoming
+// X-Forwarded-For from any non-loopback peer is never honored. KnownProxies/KnownIPNetworks are NOT
+// cleared: the framework's loopback defaults are retained and loopback is added explicitly.
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
     options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
-    options.KnownIPNetworks.Clear();
-    options.KnownProxies.Clear();
+    options.ForwardLimit = 1;
     options.KnownProxies.Add(IPAddress.Loopback);      // 127.0.0.1
     options.KnownProxies.Add(IPAddress.IPv6Loopback);  // ::1
-    options.ForwardLimit = 1;
 });
 
 // ---- Kestrel: conservative request-body-size limit ----
@@ -100,6 +102,10 @@ if (capabilities.AccountCoreEnabled)
     if (capabilities.LoginEnabled)
     {
         builder.Services.AddBitosxLogin(builder.Configuration, bitosxConnectionString!);
+
+        // Phase 2D.1: bind + validate public-exposure hardening (fail-closed) and register the auth
+        // rate limiters. Inert unless Security:PublicExposureHardening:Enabled is true.
+        builder.Services.AddPublicExposureHardening(builder.Configuration);
 
         builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
         builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)

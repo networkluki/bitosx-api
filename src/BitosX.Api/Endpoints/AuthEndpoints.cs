@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using BitosX.Api.Security;
 using BitosX.Application.Accounts;
 using BitosX.Application.Sessions;
 using BitosX.Application.Verification;
@@ -134,7 +135,10 @@ public static class AuthEndpoints
                     result.AccessToken!, result.AccessTokenExpiresAt, result.RefreshToken!, result.RefreshTokenExpiresAt))
                 : InvalidCredentials();
         })
+        // Order: per-IP (all requests reaching login) → 4 KiB body → per-normalized-email (post body-validation).
+        .AddEndpointFilter(AuthRateLimiting.LoginPerIpFilter)
         .AddEndpointFilter(RejectOversizedBody)
+        .AddEndpointFilter(AuthRateLimiting.LoginPerEmailFilter)
         .WithName("Login");
 
         // Refresh is UNAUTHENTICATED: the access token may already be expired. Identity is resolved
@@ -148,6 +152,7 @@ public static class AuthEndpoints
                     result.AccessToken!, result.AccessTokenExpiresAt, result.RefreshToken!, result.RefreshTokenExpiresAt))
                 : InvalidRefresh();
         })
+        .AddEndpointFilter(AuthRateLimiting.RefreshPerIpFilter)
         .AddEndpointFilter(RejectOversizedBody)
         .WithName("Refresh");
 

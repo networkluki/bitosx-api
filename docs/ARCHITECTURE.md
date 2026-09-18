@@ -138,7 +138,12 @@ DI `AccountCapabilities` singleton (never re-derived in endpoints):
   `DELETE /v1/account/sessions/{id}` (all `RequireAuthorization`) take identity from the validated JWT
   claims, reuse the session-management service for effective-expiry listing and server-side ownership
   (non-owned and nonexistent sessions are an indistinguishable 404), and map explicit DTOs so no
-  persistence field leaks into the contract.
+  persistence field leaks into the contract. Public-exposure hardening (`Security:PublicExposureHardening`,
+  Phase 2D.1) layers process-local token-bucket rate limiting on the unauthenticated `login`/`refresh`
+  endpoints as endpoint filters (per-IP + per-normalized-email for login, per-IP for refresh; generic 429,
+  memory-bounded partitions); the client IP comes only from the loopback-trusted `UseForwardedHeaders`
+  result and fails closed (503) when unresolvable. Inert unless enabled; the Argon2 queue / global login
+  budget / jitter (2D.2) and OpenAPI/origin gating (2D.3) are later slices.
 - **EmailVerification** (`AddBitosxEmailVerification`): register/verify/resend services,
   token factory, outbox payload crypto, and outbox persistence. Enabled when the
   verification pepper **and** outbox key are configured. Verifying an already-issued

@@ -86,8 +86,10 @@ Request: `{ "email": "user@example.com", "password": "<12..128>" }` → **200 OK
   credential evaluation).
 - The access token is a short-lived HS256 JWT (mandatory `kid`); the refresh
   token is an opaque rotating credential. The response contains no account id,
-  email, session id, password, or token verifier. Rate limiting is a production
-  blocker before public exposure (see SECURITY_MODEL).
+  email, session id, password, or token verifier.
+- When public-exposure hardening is enabled: per-IP and per-normalized-email rate
+  limits apply → generic **429** (`Retry-After` when available); if no trusted
+  client IP can be resolved → **503**. See SECURITY_MODEL for the policy.
 
 ## `POST /v1/auth/refresh`
 
@@ -106,6 +108,8 @@ shape as login).
 - Unknown / malformed / wrong-length / expired / revoked / reused → one identical
   generic **401** `{ detail: "Invalid or expired refresh token." }` (no token-state
   disclosure). Malformed JSON → **400**; body over **4 KiB** → **413**.
+- When public-exposure hardening is enabled: a per-IP rate limit applies → generic
+  **429** (`Retry-After` when available); unresolvable trusted client IP → **503**.
 
 ## `POST /v1/auth/logout`
 

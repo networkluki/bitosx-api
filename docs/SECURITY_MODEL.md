@@ -221,11 +221,38 @@ identifier and does not log headers or bodies.
   in the secret store; `JwtOptions` carries no secret-revealing `ToString`. `UseAuthentication`
   / JwtBearer / `/account/me` HTTP wiring is **deferred to Phase 2B**.
 
-## Rate limiting (production blocker for account endpoints)
-Per-IP + per-email limits on `/register`, stricter limits + min-interval + daily cap on
-`/resend-verification`, per-IP + backoff on `/verify-email`, a global outbound-email
-budget/circuit-breaker, the Argon2 concurrency cap (present), and adaptive
-Turnstile/CAPTCHA must all be in place before any public exposure.
+## Rate limiting (Phase 2D public-exposure hardening)
+
+Configured under `Security:PublicExposureHardening` (a single validated model, fail-closed at
+startup). **Inert unless `Enabled=true`** (development default false); production with the Login
+capability must enable it before public deployment. Rate limiting is **process-local** for this
+single-instance deployment; a multi-instance deployment needs a separately designed distributed limiter.
+
+**Client-IP trust model (2D.1).** Topology is Cloudflare → Apache → loopback Kestrel. `UseForwardedHeaders`
+processes exactly one hop of `X-Forwarded-For`/`-Proto` and trusts **only** the loopback proxy
+(127.0.0.1, ::1); `KnownProxies`/`KnownIPNetworks` are **not** cleared (framework loopback defaults
+retained). An `X-Forwarded-For` from any non-loopback peer is never honored, and `CF-Connecting-IP` is
+never read in-process. The authoritative client IP is `HttpContext.Connection.RemoteIpAddress` after
+forwarded-header processing (IPv4-mapped IPv6 folded to IPv4). In hardened mode, if no usable non-loopback
+client IP can be resolved for a protected public endpoint, the request **fails closed with 503** — never a
+shared/loopback bucket.
+
+**Implemented (2D.1):** token-bucket limiters (`QueueLimit=0`, no queueing) on the unauthenticated auth
+endpoints — `POST /v1/auth/login` per-IP (10 burst / 5 per 30 s) and per-normalized-email (5 burst / 1 per
+3 min, partitioned by `SHA-256(normalizedEmail)` so the email is never the key or logged; identical for
+existing and unknown accounts, enforced before credential evaluation), and `POST /v1/auth/refresh` per-IP
+(30 burst / 15 per 30 s, partitioned only by the trusted client IP — never by token/hash/contents).
+Rejection is a generic **429** (`title: Too Many Requests`, `detail: Too many requests. Try again later.`,
+plus `Retry-After` when available) that never reveals which limiter fired or any account/email/IP/token
+value; partition keys are never logged. Partition state is memory-bounded (≤4096 IP and ≤4096 email
+partitions, 30-min idle expiration, LRU eviction). A limiter/IP-resolution failure fails closed (503),
+never falling through to unrestricted auth or a credential 401.
+
+**Deferred:** bounded Argon2 work queue + process-wide login budget + response jitter (**2D.2**);
+OpenAPI/public-exposure gating + Apache/Cloudflare origin review (**2D.3**); adaptive Turnstile/CAPTCHA
+(separately approved later). Registration/verification limits (`/register`, `/resend-verification`,
+`/verify-email`) and a global outbound-email budget remain future policy — no dead endpoint code is added.
+Kestrel stays **loopback-only** until Phase 2D is complete.
 
 ## Known incomplete security work (must precede public account/auth go-live)
 
