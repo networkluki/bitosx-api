@@ -9,12 +9,13 @@ Error responses use RFC7807 ProblemDetails. Every response carries an
 > **Implemented account endpoints:** email-first registration and email
 > ownership verification with account-password creation (`/v1/auth/register`,
 > `/v1/auth/verify-email`, `/v1/auth/resend-verification`), plus **login**
-> (`/v1/auth/login`), which issues an access JWT + refresh token. **Refresh,
-> logout, session management, password reset, phone/SMS, sync, and vault
-> endpoints do not exist yet.** Registration/verification are exposed when
-> EmailVerification is configured; **login is exposed independently when the
-> Login capability is enabled** (DB connection + JWT signing key + kid), even
-> without SMTP. The API otherwise stays health/version only.
+> (`/v1/auth/login`), **refresh** (`/v1/auth/refresh`), **logout**
+> (`/v1/auth/logout`), and **logout-all** (`/v1/auth/logout-all`). **Session
+> listing, `/account/me`, delete-session, password reset, phone/SMS, sync, and
+> vault endpoints do not exist yet.** Registration/verification are exposed when
+> EmailVerification is configured; **login/refresh/logout are exposed
+> independently when the Login capability is enabled** (DB connection + JWT
+> signing key + kid), even without SMTP. The API otherwise stays health/version only.
 
 ## `POST /v1/auth/register`
 
@@ -85,6 +86,39 @@ Request: `{ "email": "user@example.com", "password": "<12..128>" }` → **200 OK
   token is an opaque rotating credential. The response contains no account id,
   email, session id, password, or token verifier. Rate limiting is a production
   blocker before public exposure (see SECURITY_MODEL).
+
+## `POST /v1/auth/refresh`
+
+**Unauthenticated** (the access token may already be expired). Exchanges an opaque
+refresh token for a new access JWT + a **rotated** refresh token. Account/session
+identity is resolved from the token by the server; no identity is accepted in the body.
+
+Request: `{ "refreshToken": "<base64url, 43 chars>" }` → **200 OK** (same `TokenResponse`
+shape as login).
+
+- On success the presented token is consumed and replaced; the previous token is
+  never valid again.
+- **Strict reuse (no grace window):** presenting an already-consumed/revoked token
+  revokes the **whole session** (and its remaining tokens); the response is the same
+  generic **401**. Reuse revocation is session-scoped — other sessions of the account stay active.
+- Unknown / malformed / wrong-length / expired / revoked / reused → one identical
+  generic **401** `{ detail: "Invalid or expired refresh token." }` (no token-state
+  disclosure). Malformed JSON → **400**; body over **4 KiB** → **413**.
+
+## `POST /v1/auth/logout`
+
+**Authenticated** (`Authorization: Bearer <access-jwt>`). Revokes **only the caller's
+current session** (identified from the validated JWT, not the body) and its refresh
+tokens. No request body. → **204 No Content**.
+
+Missing/invalid token, or a token whose session is already revoked/expired → **401**.
+(After logout the same access token no longer authenticates.)
+
+## `POST /v1/auth/logout-all`
+
+**Authenticated.** Revokes **every** session for the account (from the validated JWT
+identity) and all their refresh tokens. No request body. → **204 No Content**. Missing/
+invalid token → **401**.
 
 ## `GET /health`
 

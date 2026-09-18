@@ -130,8 +130,11 @@ DI `AccountCapabilities` singleton (never re-derived in endpoints):
   (`MapInboundClaims = false`), `UseAuthentication`/`UseAuthorization`, and a **single** per-request
   authorization seam — the JwtBearer `OnTokenValidated` event (`BitosX.Api/Auth/SessionValidation`)
   that runs the authoritative session-state check via `ISessionAuthenticator` (not a bespoke bearer
-  handler; DB session checks are never scattered across endpoints). `POST /v1/auth/login` is mapped
-  (4 KiB body limit, generic 401). Refresh/logout/`/account/*` endpoints are the remaining Phase 2B slices.
+  handler; DB session checks are never scattered across endpoints). `POST /v1/auth/login` and
+  `POST /v1/auth/refresh` are unauthenticated (refresh resolves identity from the token, strict reuse
+  handled in the store); `POST /v1/auth/logout` and `POST /v1/auth/logout-all` are authenticated with
+  identity taken from the validated JWT claims, never the body (4 KiB body limit on token endpoints,
+  generic 401). Protected `/account/*` (me, session list, delete-session) is the remaining Phase 2B slice.
 - **EmailVerification** (`AddBitosxEmailVerification`): register/verify/resend services,
   token factory, outbox payload crypto, and outbox persistence. Enabled when the
   verification pepper **and** outbox key are configured. Verifying an already-issued

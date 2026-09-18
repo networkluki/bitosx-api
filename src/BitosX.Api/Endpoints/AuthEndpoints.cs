@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using BitosX.Application.Accounts;
 using BitosX.Application.Sessions;
 using BitosX.Application.Verification;
@@ -29,6 +30,26 @@ public static class AuthEndpoints
     // disabled/null-hash/invalid-format, and no account-existence signal (anti-enumeration, §11.1).
     private static IResult InvalidCredentials() => Results.Problem(
         statusCode: StatusCodes.Status401Unauthorized, title: "Unauthorized", detail: "Invalid email or password.");
+
+    // Single generic refresh failure — unknown/malformed/expired/revoked/reused all collapse here so
+    // the response never discloses which token/session state was hit (anti-enumeration, §11.1).
+    private static IResult InvalidRefresh() => Results.Problem(
+        statusCode: StatusCodes.Status401Unauthorized, title: "Unauthorized", detail: "Invalid or expired refresh token.");
+
+    private static IResult Unauthenticated() => Results.Problem(
+        statusCode: StatusCodes.Status401Unauthorized, title: "Unauthorized", detail: "Authentication required.");
+
+    // Authoritative identity from the validated JWT claims (raw sub/sid; MapInboundClaims=false).
+    // NEVER trust account/session ids from the request body. The SessionValidation seam has already
+    // proven these are well-formed and the session is active by the time an authenticated handler runs.
+    private static bool TryGetAuthenticatedIds(ClaimsPrincipal user, out Guid accountId, out Guid sessionId)
+    {
+        sessionId = Guid.Empty;
+        return Guid.TryParse(user.FindFirst("sub")?.Value, out accountId)
+            && Guid.TryParse(user.FindFirst("sid")?.Value, out sessionId)
+            && accountId != Guid.Empty
+            && sessionId != Guid.Empty;
+    }
 
     private static IResult PayloadTooLarge() => Results.Problem(
         statusCode: StatusCodes.Status413PayloadTooLarge, title: "Payload too large", detail: "Request body exceeds the allowed size.");
@@ -115,6 +136,47 @@ public static class AuthEndpoints
         })
         .AddEndpointFilter(RejectOversizedBody)
         .WithName("Login");
+
+        // Refresh is UNAUTHENTICATED: the access token may already be expired. Identity is resolved
+        // from the opaque refresh token by the store (strict reuse handled there), never from claims.
+        group.MapPost("/refresh", async (RefreshRequest request, IRefreshService service, CancellationToken ct) =>
+        {
+            var result = await service.RefreshAsync(new RefreshCommand(request.RefreshToken), ct);
+
+            return result.Outcome == RefreshOutcome.Succeeded
+                ? Results.Ok(new TokenResponse(
+                    result.AccessToken!, result.AccessTokenExpiresAt, result.RefreshToken!, result.RefreshTokenExpiresAt))
+                : InvalidRefresh();
+        })
+        .AddEndpointFilter(RejectOversizedBody)
+        .WithName("Refresh");
+
+        // Logout / logout-all are AUTHENTICATED: identity comes from the validated JWT, never the body.
+        group.MapPost("/logout", async (HttpContext http, ISessionManagementService service, CancellationToken ct) =>
+        {
+            if (!TryGetAuthenticatedIds(http.User, out var accountId, out var sessionId))
+            {
+                return Unauthenticated();
+            }
+
+            await service.LogoutAsync(accountId, sessionId, ct); // revokes only the caller's current session
+            return Results.NoContent();
+        })
+        .RequireAuthorization()
+        .WithName("Logout");
+
+        group.MapPost("/logout-all", async (HttpContext http, ISessionManagementService service, CancellationToken ct) =>
+        {
+            if (!TryGetAuthenticatedIds(http.User, out var accountId, out _))
+            {
+                return Unauthenticated();
+            }
+
+            await service.LogoutAllAsync(accountId, ct); // revokes every session for the account
+            return Results.NoContent();
+        })
+        .RequireAuthorization()
+        .WithName("LogoutAll");
 
         return app;
     }

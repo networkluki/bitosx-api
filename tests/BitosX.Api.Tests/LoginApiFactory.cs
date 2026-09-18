@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using BitosX.Application.Email;
+using BitosX.Contracts.Accounts;
 using BitosX.Infrastructure.Email;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -105,4 +106,17 @@ public sealed class LoginApiFactory : WebApplicationFactory<Program>
         verify.EnsureSuccessStatusCode();
         return email;
     }
+
+    /// <summary>Logs in through the production endpoint and returns the token pair (starts a session).</summary>
+    public static async Task<TokenResponse> LoginAsync(HttpClient client, string email, string password)
+    {
+        var resp = await client.PostAsJsonAsync("/v1/auth/login", new { email, password });
+        resp.EnsureSuccessStatusCode();
+        return (await resp.Content.ReadFromJsonAsync<TokenResponse>())!;
+    }
+
+    /// <summary>Number of currently-non-revoked sessions for an account (by normalized email).</summary>
+    public Task<long> ActiveSessionCountAsync(string email) => QueryScalarAsync<long>(
+        "SELECT COUNT(*) FROM sessions s JOIN accounts a ON a.id=s.account_id WHERE a.normalized_email=@e AND s.revoked_at IS NULL",
+        "@e", email.ToUpperInvariant());
 }

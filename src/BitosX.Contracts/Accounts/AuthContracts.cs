@@ -13,6 +13,12 @@ public sealed record ResendVerificationRequest(string Email);
 public sealed record AcceptedResponse(string Message);
 
 /// <summary>
+/// Refresh request — the opaque refresh token only. Account/session identity is resolved from the
+/// token by the server, never supplied by the caller. The token is a bearer secret and is never logged.
+/// </summary>
+public sealed record RefreshRequest(string RefreshToken);
+
+/// <summary>
 /// Login request — the account email and password only. Any extra fields are ignored. The
 /// optional client descriptor for the session is taken from the <c>User-Agent</c> header, never
 /// from the body, so a caller cannot spoof another descriptor field.
