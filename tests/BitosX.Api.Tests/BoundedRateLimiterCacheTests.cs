@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Threading;
+using System.Threading.Tasks;
 using BitosX.Api.Security;
 using Microsoft.Extensions.Time.Testing;
 
@@ -94,6 +96,67 @@ public sealed class BoundedRateLimiterCacheTests
         clock.Advance(Idle + TimeSpan.FromMinutes(1)); // sweep timer fires past the idle window
 
         Assert.Equal(0, cache.PartitionCount);
+    }
+
+    [Fact]
+    public async Task ConcurrentAcquire_NeverRacesDisposal_NoUseAfterDispose()
+    {
+        var clock = new FakeTimeProvider();
+        // Tiny idle window so reclamation/disposal is constantly eligible; huge token limit so acquisition
+        // itself never rejects (we are probing lifetime, not the rate decision).
+        using var cache = new BoundedRateLimiterCache(
+            new TokenBucketPolicyOptions { TokenLimit = 1_000_000, TokensPerPeriod = 1, ReplenishmentSeconds = 30 },
+            maxPartitions: 64, TimeSpan.FromMilliseconds(10), clock);
+
+        const int workers = 8;
+        const int iterations = 1000;
+        var keys = Enumerable.Range(0, 16).Select(i => $"k{i}").ToArray();
+        var errors = new ConcurrentQueue<Exception>();
+        var barrier = new Barrier(workers + 1);
+
+        var acquirers = Enumerable.Range(0, workers).Select(w => Task.Run(() =>
+        {
+            barrier.SignalAndWait();
+            try
+            {
+                for (var i = 0; i < iterations; i++)
+                {
+                    if (cache.TryAcquire(keys[(w + i) % keys.Length], out var lease))
+                    {
+                        lease.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                errors.Enqueue(ex); // e.g. ObjectDisposedException would appear here on a racy implementation
+            }
+        })).ToArray();
+
+        var churner = Task.Run(() =>
+        {
+            barrier.SignalAndWait();
+            try
+            {
+                for (var i = 0; i < iterations; i++)
+                {
+                    clock.Advance(TimeSpan.FromSeconds(31)); // fires the idle sweep (disposes) + ages every entry
+                    if (cache.TryAcquire($"new-{i}", out var lease)) // insert churn → reclaim path disposal
+                    {
+                        lease.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                errors.Enqueue(ex);
+            }
+        });
+
+        await Task.WhenAll([.. acquirers, churner]);
+
+        Assert.Empty(errors); // no use-after-dispose / ObjectDisposedException
+        Assert.True(cache.PartitionCount <= 64);
     }
 
     [Fact]
