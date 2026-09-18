@@ -1,4 +1,5 @@
 using BitosX.Application.Accounts;
+using BitosX.Application.Sessions;
 using BitosX.Application.Verification;
 using BitosX.Contracts.Accounts;
 
@@ -16,8 +17,31 @@ public static class AuthEndpoints
 
     private const string EmailUnavailable = "Email verification is temporarily unavailable.";
 
+    /// <summary>Per-endpoint request-body cap for auth endpoints (§5.4), tighter than the global 64 KiB.</summary>
+    private const long MaxAuthBodyBytes = 4 * 1024;
+
+    private const int UserAgentMaxLength = 255; // matches sessions.user_agent VARCHAR(255)
+
     private static IResult EmailDeliveryUnavailable() => Results.Problem(
         statusCode: StatusCodes.Status503ServiceUnavailable, title: "Service unavailable", detail: EmailUnavailable);
+
+    // Single generic credential failure — no distinction between unknown/bad-password/unverified/
+    // disabled/null-hash/invalid-format, and no account-existence signal (anti-enumeration, §11.1).
+    private static IResult InvalidCredentials() => Results.Problem(
+        statusCode: StatusCodes.Status401Unauthorized, title: "Unauthorized", detail: "Invalid email or password.");
+
+    private static IResult PayloadTooLarge() => Results.Problem(
+        statusCode: StatusCodes.Status413PayloadTooLarge, title: "Payload too large", detail: "Request body exceeds the allowed size.");
+
+    // Rejects an oversized body BEFORE the handler evaluates credentials. Minimal-API filters run after
+    // model binding, so a malformed body still yields the framework's 400; an over-limit body with a
+    // known Content-Length is short-circuited to 413 here (the global 64 KiB Kestrel cap bounds the rest).
+    private static async ValueTask<object?> RejectOversizedBody(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+        => context.HttpContext.Request.ContentLength is > MaxAuthBodyBytes ? PayloadTooLarge() : await next(context);
+
+    private static string? TrimUserAgent(string? userAgent)
+        => string.IsNullOrWhiteSpace(userAgent) ? null
+            : (userAgent.Length > UserAgentMaxLength ? userAgent[..UserAgentMaxLength] : userAgent);
 
     public static IEndpointRouteBuilder MapAuthEndpoints(this IEndpointRouteBuilder app)
     {
@@ -65,6 +89,32 @@ public static class AuthEndpoints
             await service.ResendAsync(new ResendCommand(request.Email), ct);
             return Results.Json(new AcceptedResponse(GenericAccepted), statusCode: StatusCodes.Status202Accepted);
         }).WithName("ResendVerification");
+
+        return app;
+    }
+
+    /// <summary>
+    /// Login endpoint (<c>/v1/auth</c>), mapped only when the Login capability is enabled. The
+    /// account password is passed to the service exactly as supplied (bounds are enforced inside the
+    /// service before Argon2/DB, so an oversized/invalid credential collapses to the same generic 401
+    /// with no hashing). The session's client descriptor comes from the User-Agent header, never the body.
+    /// </summary>
+    public static IEndpointRouteBuilder MapLoginEndpoints(this IEndpointRouteBuilder app)
+    {
+        var group = app.MapGroup("/v1/auth").WithTags("Auth");
+
+        group.MapPost("/login", async (LoginRequest request, HttpContext http, ILoginService service, CancellationToken ct) =>
+        {
+            var userAgent = TrimUserAgent(http.Request.Headers.UserAgent.ToString());
+            var result = await service.LoginAsync(new LoginCommand(request.Email, request.Password, userAgent), ct);
+
+            return result.Outcome == LoginOutcome.Succeeded
+                ? Results.Ok(new TokenResponse(
+                    result.AccessToken!, result.AccessTokenExpiresAt, result.RefreshToken!, result.RefreshTokenExpiresAt))
+                : InvalidCredentials();
+        })
+        .AddEndpointFilter(RejectOversizedBody)
+        .WithName("Login");
 
         return app;
     }

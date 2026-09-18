@@ -8,11 +8,13 @@ Error responses use RFC7807 ProblemDetails. Every response carries an
 
 > **Implemented account endpoints:** email-first registration and email
 > ownership verification with account-password creation (`/v1/auth/register`,
-> `/v1/auth/verify-email`, `/v1/auth/resend-verification`). **Login, logout,
-> JWT, refresh tokens, sessions, password reset, phone/SMS, sync, and vault
-> endpoints do not exist yet.** Account endpoints are exposed only when the
-> account subsystem is configured (DB connection + verification pepper + outbox
-> key + SMTP app password); the API otherwise stays health/version only.
+> `/v1/auth/verify-email`, `/v1/auth/resend-verification`), plus **login**
+> (`/v1/auth/login`), which issues an access JWT + refresh token. **Refresh,
+> logout, session management, password reset, phone/SMS, sync, and vault
+> endpoints do not exist yet.** Registration/verification are exposed when
+> EmailVerification is configured; **login is exposed independently when the
+> Login capability is enabled** (DB connection + JWT signing key + kid), even
+> without SMTP. The API otherwise stays health/version only.
 
 ## `POST /v1/auth/register`
 
@@ -53,6 +55,36 @@ account existence/state. Rate limiting is a production blocker (see SECURITY_MOD
 Request: `{ "email": "user@example.com" }` → **202 Accepted** (generic message)
 
 No response ever contains a password, password hash, token, or token verifier.
+
+## `POST /v1/auth/login`
+
+Authenticates an account and starts a session. Mapped only when the **Login**
+capability is enabled. The password is used exactly as supplied; the email is
+case-folded for lookup (surrounding whitespace is invalid). The optional session
+client descriptor is taken from the `User-Agent` header, never the body.
+
+Request: `{ "email": "user@example.com", "password": "<12..128>" }` → **200 OK**
+
+```json
+{
+  "accessToken": "<jwt>",
+  "accessTokenExpiresAt": "2026-01-01T00:15:00Z",
+  "refreshToken": "<base64url, opaque>",
+  "refreshTokenExpiresAt": "2026-01-31T00:00:00Z",
+  "tokenType": "Bearer"
+}
+```
+
+- **Every** credential failure (unknown email, wrong password, unverified,
+  disabled, null password hash, invalid email format) → one identical generic
+  **401** `application/problem+json` (`detail: "Invalid email or password."`) —
+  no account-existence signal. No Argon2 runs for a non-login-capable account.
+- Malformed JSON → **400**. Request body over **4 KiB** → **413** (before any
+  credential evaluation).
+- The access token is a short-lived HS256 JWT (mandatory `kid`); the refresh
+  token is an opaque rotating credential. The response contains no account id,
+  email, session id, password, or token verifier. Rate limiting is a production
+  blocker before public exposure (see SECURITY_MODEL).
 
 ## `GET /health`
 

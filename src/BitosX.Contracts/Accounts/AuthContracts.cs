@@ -11,3 +11,22 @@ public sealed record ResendVerificationRequest(string Email);
 
 /// <summary>Generic response carrying no account state (anti-enumeration).</summary>
 public sealed record AcceptedResponse(string Message);
+
+/// <summary>
+/// Login request — the account email and password only. Any extra fields are ignored. The
+/// optional client descriptor for the session is taken from the <c>User-Agent</c> header, never
+/// from the body, so a caller cannot spoof another descriptor field.
+/// </summary>
+public sealed record LoginRequest(string Email, string Password);
+
+/// <summary>
+/// Token pair returned on a successful login or refresh. Carries the short-lived access JWT and the
+/// opaque rotating refresh token plus their absolute UTC expiries. Contains no account id, email, or
+/// session id. The refresh token is a bearer credential — the client stores it securely and never logs it.
+/// </summary>
+public sealed record TokenResponse(
+    string AccessToken,
+    DateTime AccessTokenExpiresAt,
+    string RefreshToken,
+    DateTime RefreshTokenExpiresAt,
+    string TokenType = "Bearer");

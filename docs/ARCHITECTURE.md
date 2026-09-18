@@ -125,8 +125,13 @@ DI `AccountCapabilities` singleton (never re-derived in endpoints):
   EmailVerification, nor any refresh-token secret** — the refresh verifier is
   `SHA-256(raw 32 token bytes)` with no server pepper. Tokens are signed with the current
   key only and validated against current **+** previous (verification-only) during rotation.
-  ASP.NET Core JwtBearer / `UseAuthentication` / `/account/me` HTTP wiring is deferred to
-  Phase 2B and consumes exactly the one `JwtTokenValidationParametersFactory`.
+  The HTTP host wires this under `if (capabilities.LoginEnabled)`: `AddBitosxLogin`, then
+  ASP.NET Core **JwtBearer** configured from exactly the one `JwtTokenValidationParametersFactory`
+  (`MapInboundClaims = false`), `UseAuthentication`/`UseAuthorization`, and a **single** per-request
+  authorization seam — the JwtBearer `OnTokenValidated` event (`BitosX.Api/Auth/SessionValidation`)
+  that runs the authoritative session-state check via `ISessionAuthenticator` (not a bespoke bearer
+  handler; DB session checks are never scattered across endpoints). `POST /v1/auth/login` is mapped
+  (4 KiB body limit, generic 401). Refresh/logout/`/account/*` endpoints are the remaining Phase 2B slices.
 - **EmailVerification** (`AddBitosxEmailVerification`): register/verify/resend services,
   token factory, outbox payload crypto, and outbox persistence. Enabled when the
   verification pepper **and** outbox key are configured. Verifying an already-issued
