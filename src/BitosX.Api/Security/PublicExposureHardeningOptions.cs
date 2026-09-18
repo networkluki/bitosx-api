@@ -21,6 +21,12 @@ public sealed class PublicExposureHardeningOptions
 
     public PartitionStateOptions PartitionState { get; set; } = new();
 
+    /// <summary>Process-wide login admission budget (2D.2). Gated by <see cref="Enabled"/>.</summary>
+    public TokenBucketPolicyOptions GlobalLoginBudget { get; set; } = new() { TokenLimit = 30, TokensPerPeriod = 15, ReplenishmentSeconds = 15 };
+
+    /// <summary>Bounded login-response jitter (2D.2). Gated by <see cref="Enabled"/>.</summary>
+    public LoginJitterOptions LoginJitter { get; set; } = new();
+
     /// <summary>Fail-closed validation of every security-relevant value. Throws on any invalid/out-of-range value.</summary>
     public void Validate()
     {
@@ -28,6 +34,21 @@ public sealed class PublicExposureHardeningOptions
         LoginPerEmail.Validate($"{SectionName}:LoginPerEmail");
         RefreshPerIp.Validate($"{SectionName}:RefreshPerIp");
         PartitionState.Validate($"{SectionName}:PartitionState");
+        GlobalLoginBudget.Validate($"{SectionName}:GlobalLoginBudget");
+        LoginJitter.Validate($"{SectionName}:LoginJitter");
+    }
+}
+
+/// <summary>Bounded login-response jitter range (inclusive), in milliseconds.</summary>
+public sealed class LoginJitterOptions
+{
+    public int MinMilliseconds { get; set; } = 25;
+    public int MaxMilliseconds { get; set; } = 75;
+
+    public void Validate(string key)
+    {
+        if (MinMilliseconds < 0) throw new InvalidOperationException($"{key}:MinMilliseconds must not be negative.");
+        if (MaxMilliseconds < MinMilliseconds) throw new InvalidOperationException($"{key}:MaxMilliseconds must be greater than or equal to MinMilliseconds.");
     }
 }
 

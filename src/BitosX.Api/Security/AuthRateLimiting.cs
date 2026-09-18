@@ -8,12 +8,18 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace BitosX.Api.Security;
 
-/// <summary>Holds the three process-local auth rate limiters (per-IP login, per-email login, per-IP refresh).</summary>
+/// <summary>
+/// Holds the process-local auth limiters: per-IP login, per-email login, per-IP refresh (all partitioned,
+/// 2D.1), plus the single process-wide login budget (unpartitioned, 2D.2).
+/// </summary>
 public sealed class AuthRateLimiters : IDisposable
 {
     public BoundedRateLimiterCache LoginPerIp { get; }
     public BoundedRateLimiterCache LoginPerEmail { get; }
     public BoundedRateLimiterCache RefreshPerIp { get; }
+
+    /// <summary>One process-wide token bucket shared across all IPs and all accounts/emails (no partition key).</summary>
+    public TokenBucketRateLimiter GlobalLoginBudget { get; }
 
     public AuthRateLimiters(PublicExposureHardeningOptions options, TimeProvider clock)
     {
@@ -21,6 +27,15 @@ public sealed class AuthRateLimiters : IDisposable
         LoginPerIp = new BoundedRateLimiterCache(options.LoginPerIp, options.PartitionState.MaxIpPartitions, idle, clock);
         RefreshPerIp = new BoundedRateLimiterCache(options.RefreshPerIp, options.PartitionState.MaxIpPartitions, idle, clock);
         LoginPerEmail = new BoundedRateLimiterCache(options.LoginPerEmail, options.PartitionState.MaxEmailPartitions, idle, clock);
+        GlobalLoginBudget = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
+        {
+            TokenLimit = options.GlobalLoginBudget.TokenLimit,
+            TokensPerPeriod = options.GlobalLoginBudget.TokensPerPeriod,
+            ReplenishmentPeriod = TimeSpan.FromSeconds(options.GlobalLoginBudget.ReplenishmentSeconds),
+            AutoReplenishment = true,
+            QueueLimit = 0,
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+        });
     }
 
     public void Dispose()
@@ -28,6 +43,7 @@ public sealed class AuthRateLimiters : IDisposable
         LoginPerIp.Dispose();
         RefreshPerIp.Dispose();
         LoginPerEmail.Dispose();
+        GlobalLoginBudget.Dispose();
     }
 }
 
@@ -48,9 +64,11 @@ public static class AuthRateLimiting
         options.Validate(); // fail startup on any invalid/out-of-range security value
 
         services.AddSingleton(options);
+        services.TryAddSingleton(TimeProvider.System);
+        // Jitter is always registered but no-ops when hardening is disabled (the endpoint always resolves it).
+        services.AddSingleton<ILoginResponseJitter, LoginResponseJitter>();
         if (options.Enabled)
         {
-            services.TryAddSingleton(TimeProvider.System);
             services.AddSingleton<AuthRateLimiters>();
         }
 
@@ -128,6 +146,37 @@ public static class AuthRateLimiting
         if (!limiters.LoginPerEmail.TryAcquire(key, out var lease))
         {
             return ServiceUnavailable();
+        }
+
+        using (lease)
+        {
+            return lease.IsAcquired ? await next(context) : TooManyRequests(http, lease);
+        }
+    }
+
+    /// <summary>
+    /// Process-wide login budget (2D.2). Runs AFTER the per-IP and per-email limiters, so a request already
+    /// rejected by those never consumes a global token. Rejection is the same generic 429. An unexpected
+    /// limiter failure fails closed (503), never unrestricted login.
+    /// </summary>
+    public static async ValueTask<object?> GlobalLoginBudgetFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+    {
+        var http = context.HttpContext;
+        var options = http.RequestServices.GetRequiredService<PublicExposureHardeningOptions>();
+        if (!options.Enabled)
+        {
+            return await next(context);
+        }
+
+        var limiters = http.RequestServices.GetRequiredService<AuthRateLimiters>();
+        RateLimitLease lease;
+        try
+        {
+            lease = limiters.GlobalLoginBudget.AttemptAcquire(1); // QueueLimit = 0 → immediate, never queues
+        }
+        catch
+        {
+            return ServiceUnavailable(); // unexpected limiter failure → fail closed
         }
 
         using (lease)

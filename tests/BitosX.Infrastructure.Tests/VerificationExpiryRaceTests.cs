@@ -14,8 +14,8 @@ internal sealed class AdvancingHasher : IAccountPasswordHasher
     private readonly TimeSpan _advance;
     public AdvancingHasher(IAccountPasswordHasher inner, FakeTimeProvider clock, TimeSpan advance)
     { _inner = inner; _clock = clock; _advance = advance; }
-    public string Hash(string password) { _clock.Advance(_advance); return _inner.Hash(password); }
-    public PasswordVerificationResult Verify(string password, string encoded) => _inner.Verify(password, encoded);
+    public Task<string> HashAsync(string password, CancellationToken cancellationToken = default) { _clock.Advance(_advance); return _inner.HashAsync(password, cancellationToken); }
+    public Task<PasswordVerificationResult> VerifyAsync(string password, string encoded, CancellationToken cancellationToken = default) => _inner.VerifyAsync(password, encoded, cancellationToken);
 }
 
 [Collection("Persistence")]
@@ -90,7 +90,7 @@ public sealed class VerificationExpiryRaceTests
         // As if the FOR UPDATE lock wait pushed the authoritative clock past expiry.
         _ctx.Clock.SetUtcNow(start.UtcDateTime.AddMilliseconds(200));
 
-        var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, _ctx.Hasher.Hash("a-valid-password-123"));
+        var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, await _ctx.Hasher.HashAsync("a-valid-password-123"));
 
         Assert.Equal(VerificationOutcome.InvalidOrExpired, outcome);
         Assert.Equal(1L, await ScalarAsync("SELECT COUNT(*) FROM accounts WHERE id=@id AND password_hash IS NULL AND email_verified_at IS NULL", r.AccountId));

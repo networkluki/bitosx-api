@@ -144,8 +144,13 @@ DI `AccountCapabilities` singleton (never re-derived in endpoints):
   memory-bounded partitions where a live limiter is never evicted for capacity — a new key fails closed
   with 503 when the cache is full and nothing is idle, so partition churn cannot reset a limiter); the
   client IP comes only from the loopback-trusted `UseForwardedHeaders`
-  result and fails closed (503) when unresolvable. Inert unless enabled; the Argon2 queue / global login
-  budget / jitter (2D.2) and OpenAPI/origin gating (2D.3) are later slices.
+  result and fails closed (503) when unresolvable. Phase 2D.2 adds: a **process-wide login budget**
+  (unpartitioned token bucket, generic 429, after per-IP/per-email so their rejections don't consume it) and
+  **25–75 ms login-response jitter** on normal outcomes only — both gated by `Enabled`; plus a **bounded
+  Argon2 work-admission gate** (`ConcurrencyLimiter`, 2 executing + 4 FIFO-queued, 2 s wait) wired in
+  `AddBitosxAccountCore` and thus **always active** (a resource-safety property of hashing), which surfaces
+  overload as an Application `PasswordHashingCapacityExceededException` mapped to a generic 503 at login. The
+  HTTP rate limiters are inert unless enabled. OpenAPI/origin gating (2D.3) is a later slice.
 - **EmailVerification** (`AddBitosxEmailVerification`): register/verify/resend services,
   token factory, outbox payload crypto, and outbox persistence. Enabled when the
   verification pepper **and** outbox key are configured. Verifying an already-issued

@@ -13,15 +13,15 @@ internal sealed class ConfigurablePasswordHasher : IAccountPasswordHasher
     public string? LastVerifyHash { get; private set; }
     public List<string>? Trace { get; set; }
 
-    public string Hash(string password) { HashCalls++; return "$argon2id$v=19$m=8192,t=1,p=1$c2FsdA$aGFzaA"; }
+    public Task<string> HashAsync(string password, CancellationToken cancellationToken = default) { HashCalls++; return Task.FromResult("$argon2id$v=19$m=8192,t=1,p=1$c2FsdA$aGFzaA"); }
 
-    public PasswordVerificationResult Verify(string password, string encodedHash)
+    public Task<PasswordVerificationResult> VerifyAsync(string password, string encodedHash, CancellationToken cancellationToken = default)
     {
         VerifyCalls++;
         LastVerifyPassword = password;
         LastVerifyHash = encodedHash;
         Trace?.Add("verify");
-        return VerifyResult;
+        return Task.FromResult(VerifyResult);
     }
 }
 

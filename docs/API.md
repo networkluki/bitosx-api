@@ -87,9 +87,12 @@ Request: `{ "email": "user@example.com", "password": "<12..128>" }` → **200 OK
 - The access token is a short-lived HS256 JWT (mandatory `kid`); the refresh
   token is an opaque rotating credential. The response contains no account id,
   email, session id, password, or token verifier.
-- When public-exposure hardening is enabled: per-IP and per-normalized-email rate
-  limits apply → generic **429** (`Retry-After` when available); if no trusted
-  client IP can be resolved → **503**. See SECURITY_MODEL for the policy.
+- When public-exposure hardening is enabled: per-IP, per-normalized-email, and a
+  process-wide login budget apply → generic **429** (`Retry-After` when available);
+  an unresolvable trusted client IP → **503**. Bounded Argon2 work admission is
+  **always** active (independent of hardening): if the hash queue is saturated or the
+  bounded wait times out, login returns a generic **503** (`Retry-After: 1`) — never a
+  credential 401 and never a token. See SECURITY_MODEL for the full policy.
 
 ## `POST /v1/auth/refresh`
 

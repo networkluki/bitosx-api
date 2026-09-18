@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using BitosX.Api.Security;
 using BitosX.Application.Accounts;
+using BitosX.Application.Security;
 using BitosX.Application.Sessions;
 using BitosX.Application.Verification;
 using BitosX.Contracts.Accounts;
@@ -54,6 +55,17 @@ public static class AuthEndpoints
 
     private static IResult PayloadTooLarge() => Results.Problem(
         statusCode: StatusCodes.Status413PayloadTooLarge, title: "Payload too large", detail: "Request body exceeds the allowed size.");
+
+    // Argon2 admission overload (queue full or acquire timeout) and unexpected post-credential jitter
+    // failure both fail closed as a generic 503 with Retry-After: 1 — never 401, never any account/queue detail.
+    private static IResult CapacityUnavailable(HttpContext http)
+    {
+        http.Response.Headers.RetryAfter = "1";
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable,
+            title: "Service unavailable",
+            detail: "Service temporarily unavailable. Try again later.");
+    }
 
     // Rejects an oversized body BEFORE the handler evaluates credentials. Minimal-API filters run after
     // model binding, so a malformed body still yields the framework's 400; an over-limit body with a
@@ -125,20 +137,45 @@ public static class AuthEndpoints
     {
         var group = app.MapGroup("/v1/auth").WithTags("Auth");
 
-        group.MapPost("/login", async (LoginRequest request, HttpContext http, ILoginService service, CancellationToken ct) =>
+        group.MapPost("/login", async (LoginRequest request, HttpContext http, ILoginService service, ILoginResponseJitter jitter, CancellationToken ct) =>
         {
-            var userAgent = TrimUserAgent(http.Request.Headers.UserAgent.ToString());
-            var result = await service.LoginAsync(new LoginCommand(request.Email, request.Password, userAgent), ct);
+            LoginResult result;
+            try
+            {
+                var userAgent = TrimUserAgent(http.Request.Headers.UserAgent.ToString());
+                result = await service.LoginAsync(new LoginCommand(request.Email, request.Password, userAgent), ct);
+            }
+            catch (PasswordHashingCapacityExceededException)
+            {
+                return CapacityUnavailable(http); // Argon2 admission overload → 503 (never a credential 401)
+            }
+
+            // Defense-in-depth jitter applies ONLY to the normal credential outcomes (200 / generic 401),
+            // after credential evaluation. Genuine cancellation stays cancellation; an unexpected jitter
+            // failure fails closed.
+            try
+            {
+                await jitter.ApplyAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                return CapacityUnavailable(http);
+            }
 
             return result.Outcome == LoginOutcome.Succeeded
                 ? Results.Ok(new TokenResponse(
                     result.AccessToken!, result.AccessTokenExpiresAt, result.RefreshToken!, result.RefreshTokenExpiresAt))
                 : InvalidCredentials();
         })
-        // Order: per-IP (all requests reaching login) → 4 KiB body → per-normalized-email (post body-validation).
+        // Order (§2D.2): per-IP → 4 KiB body → per-normalized-email → process-wide budget → credential/Argon2 → jitter.
         .AddEndpointFilter(AuthRateLimiting.LoginPerIpFilter)
         .AddEndpointFilter(RejectOversizedBody)
         .AddEndpointFilter(AuthRateLimiting.LoginPerEmailFilter)
+        .AddEndpointFilter(AuthRateLimiting.GlobalLoginBudgetFilter)
         .WithName("Login");
 
         // Refresh is UNAUTHENTICATED: the access token may already be expired. Identity is resolved

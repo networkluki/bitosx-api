@@ -36,7 +36,8 @@ internal sealed class AccountsTestContext
         // Small Argon2 params keep store tests fast.
         Hasher = new Argon2idPasswordHasher(
             new Application.Security.Argon2ParametersOptions { MemoryKiB = 8192, Iterations = 1, Lanes = 1, MaxConcurrency = 2 },
-            new KonsciousArgon2Core());
+            new KonsciousArgon2Core(),
+            new Argon2WorkGate(new Argon2AdmissionOptions()));
         RegistrationStore = new AccountRegistrationStore(factory);
         VerificationStore = new EmailVerificationStore(factory, Clock);
         OutboxStore = new EmailOutboxStore(factory);

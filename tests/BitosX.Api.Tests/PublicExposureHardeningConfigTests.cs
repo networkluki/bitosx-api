@@ -48,4 +48,24 @@ public sealed class PublicExposureHardeningConfigTests
 
     // Invalid config fails startup even when disabled (no silently-repaired security config).
     [Fact] public void InvalidConfig_FailsEvenWhenDisabled() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "Enabled"] = "false", [P + "RefreshPerIp:TokenLimit"] = "-5" }));
+
+    // ---- 2D.2 additions ----
+
+    [Fact]
+    public void GlobalLoginBudget_And_Jitter_Defaults_AreValid()
+    {
+        var services = new ServiceCollection();
+        services.AddPublicExposureHardening(Cfg(new Dictionary<string, string?>()));
+        var o = services.BuildServiceProvider().GetRequiredService<PublicExposureHardeningOptions>();
+        Assert.Equal(30, o.GlobalLoginBudget.TokenLimit);
+        Assert.Equal(15, o.GlobalLoginBudget.TokensPerPeriod);
+        Assert.Equal(25, o.LoginJitter.MinMilliseconds);
+        Assert.Equal(75, o.LoginJitter.MaxMilliseconds);
+    }
+
+    [Fact] public void GlobalBudget_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "GlobalLoginBudget:TokenLimit"] = "0" }));
+    [Fact] public void GlobalBudget_TokensPerPeriodExceedsLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "GlobalLoginBudget:TokensPerPeriod"] = "999" }));
+    [Fact] public void GlobalBudget_ZeroReplenishment_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "GlobalLoginBudget:ReplenishmentSeconds"] = "0" }));
+    [Fact] public void Jitter_NegativeMin_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "LoginJitter:MinMilliseconds"] = "-1" }));
+    [Fact] public void Jitter_MaxBelowMin_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "LoginJitter:MinMilliseconds"] = "75", [P + "LoginJitter:MaxMilliseconds"] = "25" }));
 }

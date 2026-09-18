@@ -19,6 +19,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
     <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.22.0" />
     <PackageReference Include="MySqlConnector" Version="2.6.2" />
+    <PackageReference Include="System.Threading.RateLimiting" Version="10.0.0" />
   </ItemGroup>
 
   <PropertyGroup>

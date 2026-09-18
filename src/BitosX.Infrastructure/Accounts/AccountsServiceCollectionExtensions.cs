@@ -239,11 +239,22 @@ public static class AccountsServiceCollectionExtensions
         var argon2 = new Argon2ParametersOptions();
         configuration.GetSection("Security:Argon2").Bind(argon2);
 
+        // Bounded Argon2 work-admission gate. This resource-safety bound is ALWAYS active (independent of
+        // PublicExposureHardening:Enabled), and its configuration is validated fail-closed at startup.
+        var admission = new Argon2AdmissionOptions();
+        configuration.GetSection(Argon2AdmissionOptions.SectionName).Bind(admission);
+        admission.Validate();
+
         services.AddSingleton(argon2);
+        services.AddSingleton(admission);
+        services.AddSingleton<Argon2WorkGate>(); // one gate, shared by every production Argon2 operation
         services.TryAddSingletonTimeProvider();
         services.AddSingleton<IArgon2Core, KonsciousArgon2Core>();
         services.AddSingleton<IAccountPasswordHasher>(sp =>
-            new Argon2idPasswordHasher(sp.GetRequiredService<Argon2ParametersOptions>(), sp.GetRequiredService<IArgon2Core>()));
+            new Argon2idPasswordHasher(
+                sp.GetRequiredService<Argon2ParametersOptions>(),
+                sp.GetRequiredService<IArgon2Core>(),
+                sp.GetRequiredService<Argon2WorkGate>()));
         return services;
     }
 

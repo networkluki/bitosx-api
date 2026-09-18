@@ -22,14 +22,20 @@ public enum PasswordVerificationResult
 /// </summary>
 public interface IAccountPasswordHasher
 {
-    /// <summary>Produces a self-describing PHC hash string for the password.</summary>
-    string Hash(string password);
+    /// <summary>
+    /// Produces a self-describing PHC hash string for the password. The Argon2 computation passes through
+    /// a bounded work-admission gate; if capacity is exhausted (or the bounded wait times out) it throws
+    /// <see cref="PasswordHashingCapacityExceededException"/>. Honors <paramref name="cancellationToken"/>.
+    /// </summary>
+    Task<string> HashAsync(string password, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Verifies a password against a stored PHC hash. Validates the encoded
-    /// parameters against safe resource bounds BEFORE running Argon2; a hostile
-    /// hash returns <see cref="PasswordVerificationResult.InvalidHashFormat"/>
-    /// without performing expensive work.
+    /// Verifies a password against a stored PHC hash. Validates the encoded parameters against safe
+    /// resource bounds BEFORE running Argon2; a hostile hash returns
+    /// <see cref="PasswordVerificationResult.InvalidHashFormat"/> without performing expensive work. The
+    /// Argon2 computation passes through the bounded work-admission gate; if capacity is exhausted (or the
+    /// bounded wait times out) it throws <see cref="PasswordHashingCapacityExceededException"/> (distinct
+    /// from <see cref="PasswordVerificationResult.Failed"/>). Honors <paramref name="cancellationToken"/>.
     /// </summary>
-    PasswordVerificationResult Verify(string password, string encodedHash);
+    Task<PasswordVerificationResult> VerifyAsync(string password, string encodedHash, CancellationToken cancellationToken = default);
 }

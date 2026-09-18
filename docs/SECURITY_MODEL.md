@@ -255,11 +255,35 @@ execution. Inserts happen only under a lock after a capacity check, so the maxim
 concurrency. A limiter/IP-resolution failure likewise fails closed (503), never falling through to
 unrestricted auth.
 
-**Deferred:** bounded Argon2 work queue + process-wide login budget + response jitter (**2D.2**);
-OpenAPI/public-exposure gating + Apache/Cloudflare origin review (**2D.3**); adaptive Turnstile/CAPTCHA
-(separately approved later). Registration/verification limits (`/register`, `/resend-verification`,
-`/verify-email`) and a global outbound-email budget remain future policy — no dead endpoint code is added.
-Kestrel stays **loopback-only** until Phase 2D is complete.
+**Implemented (2D.2):**
+
+- **Bounded Argon2 work admission (ALWAYS active — independent of `Enabled`).** Password hashing is a
+  resource-safety chokepoint, so the Argon2 gate is wired in `AddBitosxAccountCore` and applies to every
+  production Argon2 operation (login verify today; future registration / password-change / reset go through
+  the same hasher). Built on a BCL `ConcurrencyLimiter`: at most **2** operations execute, at most **4** wait
+  (**oldest-first / FIFO**), a queued operation waits at most **2 s**, and a further operation is rejected
+  immediately. Queue-full and acquire-timeout both surface as an Application-level
+  `PasswordHashingCapacityExceededException` (never a password mismatch); genuine cancellation propagates and
+  is never rewritten. At the login boundary this maps to a generic **503** (`title: Service unavailable`,
+  `detail: Service temporarily unavailable. Try again later.`, `Retry-After: 1`) — never a credential 401 and
+  never a token; the response discloses nothing about slots/queue/account/credentials. Its configuration
+  (`Security:PublicExposureHardening:Argon2`) is validated fail-closed at startup even when hardening is disabled.
+- **Process-wide login budget (gated by `Enabled`).** One unpartitioned token bucket (30 burst / 15 per 15 s,
+  `QueueLimit=0`), shared across all IPs and accounts, admitted AFTER the per-IP and per-email limiters (so a
+  request already rejected there never consumes a global token) and BEFORE credential evaluation. Rejection is
+  the same generic **429**; an unexpected limiter failure fails closed (503), never unrestricted login.
+- **Bounded login-response jitter (gated by `Enabled`).** A uniform 25–75 ms async delay applied ONLY to the
+  normal credential outcomes (200 / generic 401), after credential evaluation — never to 400/413/429/503 or a
+  canceled request, and never derived from any identity data. Defense-in-depth only; it does not replace
+  constant-time credential handling, Argon2 work, or rate limiting.
+
+The login-path control order is: trusted client-IP → per-IP → 4 KiB body → per-normalized-email →
+process-wide budget → credential/Argon2 admission → jitter → 200/401.
+
+**Deferred:** OpenAPI/public-exposure gating + Apache/Cloudflare origin review (**2D.3**); adaptive
+Turnstile/CAPTCHA (separately approved later). Registration/verification limits (`/register`,
+`/resend-verification`, `/verify-email`) and a global outbound-email budget remain future policy — no dead
+endpoint code is added. Kestrel stays **loopback-only** until Phase 2D is complete.
 
 ## Known incomplete security work (must precede public account/auth go-live)
 

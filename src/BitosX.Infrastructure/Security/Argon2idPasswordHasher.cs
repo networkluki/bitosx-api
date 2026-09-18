@@ -17,31 +17,31 @@ public sealed class Argon2idPasswordHasher : IAccountPasswordHasher
 
     private readonly Argon2ParametersOptions _options;
     private readonly IArgon2Core _core;
-    private readonly SemaphoreSlim _gate;
+    private readonly Argon2WorkGate _gate;
 
-    public Argon2idPasswordHasher(Argon2ParametersOptions options, IArgon2Core core)
+    public Argon2idPasswordHasher(Argon2ParametersOptions options, IArgon2Core core, Argon2WorkGate gate)
     {
         _options = options;
         _core = core;
-        _gate = new SemaphoreSlim(Math.Max(1, options.MaxConcurrency));
+        _gate = gate;
     }
 
-    public string Hash(string password)
+    public async Task<string> HashAsync(string password, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(password);
 
         var salt = RandomNumberGenerator.GetBytes(SaltBytes);
         var passwordBytes = Encoding.UTF8.GetBytes(password);
 
-        var hash = Compute(passwordBytes, salt, _options.MemoryKiB, _options.Iterations, _options.Lanes, HashBytes);
+        var hash = await ComputeAsync(passwordBytes, salt, _options.MemoryKiB, _options.Iterations, _options.Lanes, HashBytes, cancellationToken).ConfigureAwait(false);
         return Argon2PhcString.Encode(_options.MemoryKiB, _options.Iterations, _options.Lanes, salt, hash);
     }
 
-    public PasswordVerificationResult Verify(string password, string encodedHash)
+    public async Task<PasswordVerificationResult> VerifyAsync(string password, string encodedHash, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(password);
 
-        // (1) Structural parse + static hard bounds — no Argon2, no large alloc.
+        // (1) Structural parse + static hard bounds — no Argon2, no large alloc, no gate admission.
         if (!Argon2PhcString.TryParse(encodedHash, out var phc) || phc is null)
         {
             return PasswordVerificationResult.InvalidHashFormat;
@@ -57,9 +57,9 @@ public sealed class Argon2idPasswordHasher : IAccountPasswordHasher
             return PasswordVerificationResult.InvalidHashFormat;
         }
 
-        // (3) Only now do we run the (bounded) KDF.
+        // (3) Only now do we admit + run the (bounded) KDF.
         var passwordBytes = Encoding.UTF8.GetBytes(password);
-        var computed = Compute(passwordBytes, phc.Salt, phc.MemoryKiB, phc.Iterations, phc.Lanes, phc.Hash.Length);
+        var computed = await ComputeAsync(passwordBytes, phc.Salt, phc.MemoryKiB, phc.Iterations, phc.Lanes, phc.Hash.Length, cancellationToken).ConfigureAwait(false);
 
         if (!CryptographicOperations.FixedTimeEquals(computed, phc.Hash))
         {
@@ -70,16 +70,11 @@ public sealed class Argon2idPasswordHasher : IAccountPasswordHasher
         return weaker ? PasswordVerificationResult.NeedsRehash : PasswordVerificationResult.Success;
     }
 
-    private byte[] Compute(byte[] password, byte[] salt, int memoryKiB, int iterations, int lanes, int outputLength)
+    private async Task<byte[]> ComputeAsync(byte[] password, byte[] salt, int memoryKiB, int iterations, int lanes, int outputLength, CancellationToken cancellationToken)
     {
-        _gate.Wait();
-        try
-        {
-            return _core.Compute(password, salt, memoryKiB, iterations, lanes, outputLength);
-        }
-        finally
-        {
-            _gate.Release();
-        }
+        // Bounded admission: throws PasswordHashingCapacityExceededException on saturation/timeout;
+        // propagates OperationCanceledException on genuine cancellation. The lease releases exactly once.
+        using var permit = await _gate.AcquireAsync(cancellationToken).ConfigureAwait(false);
+        return _core.Compute(password, salt, memoryKiB, iterations, lanes, outputLength);
     }
 }

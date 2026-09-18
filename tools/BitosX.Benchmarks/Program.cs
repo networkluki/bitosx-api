@@ -33,19 +33,22 @@ Console.WriteLine("cap | budgetOK | single(ms) | p50(ms) | p95(ms) | throughput(
 foreach (var cap in new[] { 1, 2, 3 })
 {
     var budgetOk = (long)MemoryKiB * cap <= 192 * 1024;
+    // Concurrency is now bounded by the Argon2 work gate (MaxConcurrent), not the options' MaxConcurrency.
+    // A large queue + timeout admits the whole parallel batch so this measures latency at the cap.
     var hasher = new Argon2idPasswordHasher(
         new Argon2ParametersOptions { MemoryKiB = MemoryKiB, Iterations = Iterations, Lanes = 1, MaxConcurrency = cap },
-        core);
+        core,
+        new Argon2WorkGate(new Argon2AdmissionOptions { MaxConcurrent = cap, QueueCapacity = 1024, AcquireTimeoutMilliseconds = 600_000 }));
 
     // Warm up.
-    hasher.Hash(Password);
+    hasher.HashAsync(Password).GetAwaiter().GetResult();
 
     // Single-hash latency (no contention), median of 5.
     var single = new List<long>();
     for (var i = 0; i < 5; i++)
     {
         var sw = Stopwatch.StartNew();
-        hasher.Hash(Password);
+        hasher.HashAsync(Password).GetAwaiter().GetResult();
         sw.Stop();
         single.Add(sw.ElapsedMilliseconds);
     }
@@ -58,7 +61,7 @@ foreach (var cap in new[] { 1, 2, 3 })
     Parallel.For(0, total, _ =>
     {
         var sw = Stopwatch.StartNew();
-        hasher.Hash(Password);
+        hasher.HashAsync(Password).GetAwaiter().GetResult();
         sw.Stop();
         latencies.Add(sw.ElapsedMilliseconds);
     });

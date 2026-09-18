@@ -1,8 +1,10 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
+using BitosX.Api.Security;
 using BitosX.Application.Email;
 using BitosX.Infrastructure.Email;
+using BitosX.Infrastructure.Security;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -51,6 +53,12 @@ public sealed class HardenedAuthApiFactory : WebApplicationFactory<Program>
     /// <summary>Per-instance config overrides, applied over the hardened defaults. Set before the first client.</summary>
     public IDictionary<string, string?> Overrides { get; } = new Dictionary<string, string?>();
 
+    /// <summary>Optional Argon2 core replacement (test double at the Infrastructure boundary). Set before the first client.</summary>
+    public IArgon2Core? Argon2CoreOverride { get; set; }
+
+    /// <summary>Optional login-jitter replacement (recording fake). Set before the first client.</summary>
+    public ILoginResponseJitter? JitterOverride { get; set; }
+
     public HardenedAuthApiFactory()
     {
         var cfg = new ConfigurationBuilder().AddUserSecrets("bitosx-infrastructure-tests").Build();
@@ -79,6 +87,15 @@ public sealed class HardenedAuthApiFactory : WebApplicationFactory<Program>
 
         // Hardening ON (rate limiters active).
         builder.UseSetting("Security:PublicExposureHardening:Enabled", "true");
+
+        // Test-harness default: make the PROCESS-WIDE login budget effectively non-binding so per-IP /
+        // per-email / trust-chain tests are not throttled by cumulative logins across a class. Tests that
+        // exercise the global budget override these below. (Production default remains 30/15/15, covered by
+        // the config-validation tests.)
+        builder.UseSetting("Security:PublicExposureHardening:GlobalLoginBudget:TokenLimit", "1000000");
+        builder.UseSetting("Security:PublicExposureHardening:GlobalLoginBudget:TokensPerPeriod", "1000000");
+        builder.UseSetting("Security:PublicExposureHardening:GlobalLoginBudget:ReplenishmentSeconds", "1");
+
         foreach (var kv in Overrides)
         {
             builder.UseSetting(kv.Key, kv.Value);
@@ -90,6 +107,18 @@ public sealed class HardenedAuthApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IEmailSender>();
             services.AddSingleton<IEmailSender>(Emails);
             services.AddSingleton<IStartupFilter, TestPeerIpStartupFilter>();
+
+            if (Argon2CoreOverride is not null)
+            {
+                services.RemoveAll<IArgon2Core>();
+                services.AddSingleton(Argon2CoreOverride);
+            }
+
+            if (JitterOverride is not null)
+            {
+                services.RemoveAll<ILoginResponseJitter>();
+                services.AddSingleton(JitterOverride);
+            }
         });
     }
 

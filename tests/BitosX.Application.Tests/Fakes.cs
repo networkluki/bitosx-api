@@ -67,8 +67,8 @@ internal sealed class FakeVerificationStore : IEmailVerificationStore
 internal sealed class SpyPasswordHasher : IAccountPasswordHasher
 {
     public int HashCalls { get; private set; }
-    public string Hash(string password) { HashCalls++; return "$argon2id$v=19$m=8192,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ"; }
-    public PasswordVerificationResult Verify(string password, string encoded) => PasswordVerificationResult.Success;
+    public Task<string> HashAsync(string password, CancellationToken cancellationToken = default) { HashCalls++; return Task.FromResult("$argon2id$v=19$m=8192,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ"); }
+    public Task<PasswordVerificationResult> VerifyAsync(string password, string encoded, CancellationToken cancellationToken = default) => Task.FromResult(PasswordVerificationResult.Success);
 }
 
 internal sealed class FakeTokenFactory : IEmailVerificationTokenFactory

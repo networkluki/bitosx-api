@@ -66,7 +66,7 @@ public sealed class LoginService : ILoginService
         }
 
         // Argon2 verification OUTSIDE any transaction/row lock.
-        var verification = _passwordHasher.Verify(command.Password, candidate.PasswordHash);
+        var verification = await _passwordHasher.VerifyAsync(command.Password, candidate.PasswordHash, cancellationToken).ConfigureAwait(false);
         if (verification is PasswordVerificationResult.Failed or PasswordVerificationResult.InvalidHashFormat)
         {
             return LoginResult.InvalidCredentials;
