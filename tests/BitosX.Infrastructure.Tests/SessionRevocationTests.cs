@@ -205,6 +205,71 @@ public sealed class SessionRevocationTests
         Assert.DoesNotContain(revoked, ids);        // unrevoked only
     }
 
+    // ============================ LIST usability filter (MIN-1) ============================
+
+    private async Task<Guid[]> ListIdsAsync(Guid accountId, TimeProvider? clock = null)
+        => (await Store(clock).ListSessionsAsync(accountId)).Select(r => r.Id).ToArray();
+
+    [Fact]
+    public async Task List_ExcludesAbsoluteExpired()
+    {
+        var accountId = await SeedAccountAsync();
+        var (expired, _) = await SeedSessionTokenAsync(accountId, NewVerifier(), absoluteExpiresAt: Now.AddHours(-1));
+        var (active, _) = await SeedSessionTokenAsync(accountId, NewVerifier());
+        var ids = await ListIdsAsync(accountId);
+        Assert.DoesNotContain(expired, ids);
+        Assert.Contains(active, ids);
+    }
+
+    [Fact]
+    public async Task List_ExcludesAbsoluteExpiryExactlyNow()
+    {
+        var accountId = await SeedAccountAsync();
+        var (boundary, _) = await SeedSessionTokenAsync(accountId, NewVerifier(), absoluteExpiresAt: Now);
+        Assert.DoesNotContain(boundary, await ListIdsAsync(accountId));
+    }
+
+    [Fact]
+    public async Task List_ExcludesIdleExpired()
+    {
+        var accountId = await SeedAccountAsync();
+        var (idle, _) = await SeedSessionTokenAsync(accountId, NewVerifier(), lastSeenAt: Now.AddDays(-31), absoluteExpiresAt: Now.AddDays(90));
+        Assert.DoesNotContain(idle, await ListIdsAsync(accountId));
+    }
+
+    [Fact]
+    public async Task List_ExcludesIdleAgeExactlyLimit()
+    {
+        var accountId = await SeedAccountAsync();
+        var (boundary, _) = await SeedSessionTokenAsync(accountId, NewVerifier(), lastSeenAt: Now.AddDays(-30), absoluteExpiresAt: Now.AddDays(90));
+        Assert.DoesNotContain(boundary, await ListIdsAsync(accountId));
+    }
+
+    [Fact]
+    public async Task List_IncludesJustInsideIdleWindow()
+    {
+        var accountId = await SeedAccountAsync();
+        var (justInside, _) = await SeedSessionTokenAsync(accountId, NewVerifier(), lastSeenAt: Now.AddDays(-30).AddSeconds(1), absoluteExpiresAt: Now.AddDays(90));
+        Assert.Contains(justInside, await ListIdsAsync(accountId));
+    }
+
+    [Fact]
+    public async Task List_IncludesNormalActiveSession()
+    {
+        var accountId = await SeedAccountAsync();
+        var (active, _) = await SeedSessionTokenAsync(accountId, NewVerifier());
+        Assert.Contains(active, await ListIdsAsync(accountId));
+    }
+
+    [Fact]
+    public async Task List_DependsOnTimeProvider_ExcludedWhenClockAdvancesToIdleBoundary()
+    {
+        var accountId = await SeedAccountAsync();
+        var (sessionId, _) = await SeedSessionTokenAsync(accountId, NewVerifier(), lastSeenAt: Now, absoluteExpiresAt: Now.AddDays(90));
+        Assert.Contains(sessionId, await ListIdsAsync(accountId, Clock()));                       // active at Now
+        Assert.DoesNotContain(sessionId, await ListIdsAsync(accountId, Clock(Now.AddDays(30))));  // idle age == 30d after advance → excluded
+    }
+
     // ============================ REFRESH vs REVOCATION concurrency ============================
 
     [Fact]

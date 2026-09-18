@@ -456,7 +456,7 @@ A non-revoking duplicate-grace window **preserves an attacker's successor token*
 - `DELETE /sessions/{ownId}` → 204; session revoked.
 - `DELETE /sessions/{otherAccountId'sSession}` → 404 (no ownership disclosure).
 - `DELETE /sessions/{nonexistent}` → 404.
-- `GET /sessions` → lists only caller's sessions; `current=true` for the calling session; no hashes/chain-ids/jti/raw internals.
+- `GET /sessions` → lists only the caller's **current usable** sessions — a management view, not history: `revoked_at IS NULL ∧ absolute_expires_at > now ∧ (now − last_seen_at) < IdleLifetime` (same predicate as `SessionAuthenticator`; `absolute == now` and idle `== IdleLifetime` excluded). `current=true` for the calling session; **`ExpiresAt` = the effective expiry `min(absolute_expires_at, last_seen_at + IdleLifetime)`**; no user-agent/account-id/hashes/chain-ids/jti/raw internals.
 - `GET /me` → `{accountId, email, emailVerified, createdAt}` only; no password/token/session internals.
 
 ### 13.6 ZERO KNOWLEDGE

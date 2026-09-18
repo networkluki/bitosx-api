@@ -383,15 +383,24 @@ public sealed class SessionStore : ISessionStore
 
     public async Task<IReadOnlyList<SessionListRow>> ListSessionsAsync(Guid accountId, CancellationToken cancellationToken = default)
     {
-        // READ-ONLY, no lock. Unrevoked sessions only, deterministic order.
+        // READ-ONLY, no lock. CURRENT USABLE sessions only (not history): unrevoked AND not
+        // absolute-expired AND within the idle window — the same predicate SessionAuthenticator
+        // uses (absolute_expires_at == now excluded; idle age == IdleLifetime excluded). One
+        // authoritative TimeProvider now; no local time, no DB NOW().
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var idleCutoff = now - _options.IdleLifetime;
+
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         var rows = await connection.QueryAsync<SessionListRow>(new CommandDefinition(
             """
             SELECT id AS Id, created_at AS CreatedAt, last_seen_at AS LastSeenAt, absolute_expires_at AS AbsoluteExpiresAt
             FROM sessions
-            WHERE account_id = @accountId AND revoked_at IS NULL
+            WHERE account_id = @accountId
+              AND revoked_at IS NULL
+              AND absolute_expires_at > @now
+              AND last_seen_at > @idleCutoff
             ORDER BY created_at DESC, id;
-            """, new { accountId }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            """, new { accountId, now, idleCutoff }, cancellationToken: cancellationToken)).ConfigureAwait(false);
         return rows.ToList();
     }
 
