@@ -49,6 +49,9 @@ public sealed class AuthPrimitivesBoundaryTests
         [
             typeof(Sessions.LoginCommand), typeof(Sessions.LoginResult),
             typeof(Sessions.RefreshCommand), typeof(Sessions.RefreshResult),
+            typeof(Sessions.SessionListItem),
+            typeof(Abstractions.Persistence.SessionAuthState),
+            typeof(Abstractions.Persistence.SessionListRow),
         ];
         foreach (var type in sessionTypes)
         {

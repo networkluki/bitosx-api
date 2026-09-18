@@ -298,4 +298,118 @@ public sealed class SessionStore : ISessionStore
             LIMIT 1;
             """, new { sessionId }, cancellationToken: cancellationToken)).ConfigureAwait(false);
     }
+
+    public async Task LogoutAsync(Guid accountId, Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        // Canonical lock order: account → session → refresh_tokens (separate statements).
+        await LockAccountAsync(connection, tx, accountId, cancellationToken).ConfigureAwait(false);
+        var owned = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+            "SELECT id FROM sessions WHERE id = @sessionId AND account_id = @accountId FOR UPDATE;",
+            new { sessionId, accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        if (owned is null)
+        {
+            // Missing / other-account / already-gone → idempotent no-op success.
+            await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await LockSessionRefreshTokensAsync(connection, tx, sessionId, cancellationToken).ConfigureAwait(false);
+        var now = _clock.GetUtcNow().UtcDateTime;
+        await RevokeSessionAndTokensAsync(connection, tx, sessionId, now, cancellationToken).ConfigureAwait(false);
+        await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task LogoutAllAsync(Guid accountId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        await LockAccountAsync(connection, tx, accountId, cancellationToken).ConfigureAwait(false);
+
+        // Lock the account's active sessions in deterministic id order.
+        var sessionIds = (await connection.QueryAsync<Guid>(new CommandDefinition(
+            "SELECT id FROM sessions WHERE account_id = @accountId AND revoked_at IS NULL ORDER BY id FOR UPDATE;",
+            new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false)).ToList();
+
+        if (sessionIds.Count == 0)
+        {
+            await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // Lock their refresh tokens deterministically, then revoke sessions + tokens (account-scoped).
+        _ = await connection.QueryAsync<Guid>(new CommandDefinition(
+            "SELECT id FROM refresh_tokens WHERE session_id IN @sessionIds ORDER BY id FOR UPDATE;",
+            new { sessionIds }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        var now = _clock.GetUtcNow().UtcDateTime;
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE sessions SET revoked_at = @now WHERE account_id = @accountId AND revoked_at IS NULL;",
+            new { now, accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE refresh_tokens SET revoked_at = @now WHERE session_id IN @sessionIds AND revoked_at IS NULL;",
+            new { now, sessionIds }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<SessionDeleteOutcome> DeleteSessionAsync(Guid accountId, Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        await LockAccountAsync(connection, tx, accountId, cancellationToken).ConfigureAwait(false);
+        var owned = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+            "SELECT id FROM sessions WHERE id = @sessionId AND account_id = @accountId FOR UPDATE;",
+            new { sessionId, accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        if (owned is null)
+        {
+            // Nonexistent OR another account's session → identical NotFound (no ownership disclosure).
+            await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            return SessionDeleteOutcome.NotFound;
+        }
+
+        await LockSessionRefreshTokensAsync(connection, tx, sessionId, cancellationToken).ConfigureAwait(false);
+        var now = _clock.GetUtcNow().UtcDateTime;
+        await RevokeSessionAndTokensAsync(connection, tx, sessionId, now, cancellationToken).ConfigureAwait(false);
+        await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return SessionDeleteOutcome.Deleted; // idempotent: an owned already-revoked session is still Deleted
+    }
+
+    public async Task<IReadOnlyList<SessionListRow>> ListSessionsAsync(Guid accountId, CancellationToken cancellationToken = default)
+    {
+        // READ-ONLY, no lock. Unrevoked sessions only, deterministic order.
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        var rows = await connection.QueryAsync<SessionListRow>(new CommandDefinition(
+            """
+            SELECT id AS Id, created_at AS CreatedAt, last_seen_at AS LastSeenAt, absolute_expires_at AS AbsoluteExpiresAt
+            FROM sessions
+            WHERE account_id = @accountId AND revoked_at IS NULL
+            ORDER BY created_at DESC, id;
+            """, new { accountId }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        return rows.ToList();
+    }
+
+    private static Task LockAccountAsync(MySqlConnector.MySqlConnection connection, MySqlConnector.MySqlTransaction tx, Guid accountId, CancellationToken ct)
+        => connection.ExecuteAsync(new CommandDefinition(
+            "SELECT id FROM accounts WHERE id = @accountId FOR UPDATE;", new { accountId }, tx, cancellationToken: ct));
+
+    private static Task LockSessionRefreshTokensAsync(MySqlConnector.MySqlConnection connection, MySqlConnector.MySqlTransaction tx, Guid sessionId, CancellationToken ct)
+        => connection.QueryAsync<Guid>(new CommandDefinition(
+            "SELECT id FROM refresh_tokens WHERE session_id = @sessionId ORDER BY id FOR UPDATE;", new { sessionId }, tx, cancellationToken: ct));
+
+    private static async Task RevokeSessionAndTokensAsync(MySqlConnector.MySqlConnection connection, MySqlConnector.MySqlTransaction tx, Guid sessionId, DateTime now, CancellationToken ct)
+    {
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE sessions SET revoked_at = @now WHERE id = @sessionId AND revoked_at IS NULL;",
+            new { now, sessionId }, tx, cancellationToken: ct)).ConfigureAwait(false);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE refresh_tokens SET revoked_at = @now WHERE session_id = @sessionId AND revoked_at IS NULL;",
+            new { now, sessionId }, tx, cancellationToken: ct)).ConfigureAwait(false);
+    }
 }

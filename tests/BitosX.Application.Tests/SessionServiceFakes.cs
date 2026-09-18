@@ -135,4 +135,45 @@ internal sealed class FakeSessionStore : ISessionStore
         if (AuthStateThrows is not null) throw AuthStateThrows;
         return Task.FromResult(AuthState);
     }
+
+    public SessionDeleteOutcome DeleteResult { get; set; } = SessionDeleteOutcome.Deleted;
+    public IReadOnlyList<SessionListRow> ListResult { get; set; } = [];
+    public int LogoutCalls { get; private set; }
+    public int LogoutAllCalls { get; private set; }
+    public int DeleteCalls { get; private set; }
+    public int ListCalls { get; private set; }
+    public Guid LastLogoutAccountId { get; private set; }
+    public Guid LastLogoutSessionId { get; private set; }
+    public Guid LastLogoutAllAccountId { get; private set; }
+    public Guid LastDeleteAccountId { get; private set; }
+    public Guid LastDeleteSessionId { get; private set; }
+    public Guid LastListAccountId { get; private set; }
+
+    public Task LogoutAsync(Guid accountId, Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        LogoutCalls++; LastLogoutAccountId = accountId; LastLogoutSessionId = sessionId;
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.CompletedTask;
+    }
+
+    public Task LogoutAllAsync(Guid accountId, CancellationToken cancellationToken = default)
+    {
+        LogoutAllCalls++; LastLogoutAllAccountId = accountId;
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.CompletedTask;
+    }
+
+    public Task<SessionDeleteOutcome> DeleteSessionAsync(Guid accountId, Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        DeleteCalls++; LastDeleteAccountId = accountId; LastDeleteSessionId = sessionId;
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(DeleteResult);
+    }
+
+    public Task<IReadOnlyList<SessionListRow>> ListSessionsAsync(Guid accountId, CancellationToken cancellationToken = default)
+    {
+        ListCalls++; LastListAccountId = accountId;
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(ListResult);
+    }
 }

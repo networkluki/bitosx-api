@@ -145,4 +145,42 @@ public interface ISessionStore
     /// NOT an exception. Used by <c>SessionAuthenticator</c> for per-request authorization.
     /// </summary>
     Task<SessionAuthState?> GetSessionAuthStateAsync(Guid sessionId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Revoke one owned session (logout): lock accounts → session → its refresh tokens, then set
+    /// <c>revoked_at</c> on the session and all its still-active refresh tokens. Idempotent — a
+    /// missing/other-account/already-revoked session is a no-op success (no exception).
+    /// </summary>
+    Task LogoutAsync(Guid accountId, Guid sessionId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Revoke ALL of the account's active sessions and their refresh tokens (logout-all), account-scoped,
+    /// in the canonical lock order with deterministic session ordering. Idempotent.
+    /// </summary>
+    Task LogoutAllAsync(Guid accountId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Revoke one owned session (backing DELETE /account/sessions/{id}). Returns
+    /// <see cref="SessionDeleteOutcome.Deleted"/> for an owned session (idempotent if already revoked)
+    /// and <see cref="SessionDeleteOutcome.NotFound"/> for a nonexistent OR other-account session
+    /// (identical — no ownership disclosure).
+    /// </summary>
+    Task<SessionDeleteOutcome> DeleteSessionAsync(Guid accountId, Guid sessionId, CancellationToken cancellationToken = default);
+
+    /// <summary>Lists the account's unrevoked sessions (read-only), ordered deterministically.</summary>
+    Task<IReadOnlyList<SessionListRow>> ListSessionsAsync(Guid accountId, CancellationToken cancellationToken = default);
 }
+
+/// <summary>Coarse delete/revoke outcome — <see cref="NotFound"/> hides ownership.</summary>
+public enum SessionDeleteOutcome
+{
+    Deleted,
+    NotFound,
+}
+
+/// <summary>
+/// A raw unrevoked-session row for listing. The service maps this to a safe DTO (adding the
+/// effective expiry + current flag); it carries no user-agent/account-id/secret fields beyond the
+/// timestamps needed to compute the effective expiry.
+/// </summary>
+public sealed record SessionListRow(Guid Id, DateTime CreatedAt, DateTime LastSeenAt, DateTime AbsoluteExpiresAt);
