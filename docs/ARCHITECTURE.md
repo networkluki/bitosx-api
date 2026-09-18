@@ -134,7 +134,11 @@ DI `AccountCapabilities` singleton (never re-derived in endpoints):
   `POST /v1/auth/refresh` are unauthenticated (refresh resolves identity from the token, strict reuse
   handled in the store); `POST /v1/auth/logout` and `POST /v1/auth/logout-all` are authenticated with
   identity taken from the validated JWT claims, never the body (4 KiB body limit on token endpoints,
-  generic 401). Protected `/account/*` (me, session list, delete-session) is the remaining Phase 2B slice.
+  generic 401). The protected account endpoints `GET /v1/account/me`, `GET /v1/account/sessions`, and
+  `DELETE /v1/account/sessions/{id}` (all `RequireAuthorization`) take identity from the validated JWT
+  claims, reuse the session-management service for effective-expiry listing and server-side ownership
+  (non-owned and nonexistent sessions are an indistinguishable 404), and map explicit DTOs so no
+  persistence field leaks into the contract.
 - **EmailVerification** (`AddBitosxEmailVerification`): register/verify/resend services,
   token factory, outbox payload crypto, and outbox persistence. Enabled when the
   verification pepper **and** outbox key are configured. Verifying an already-issued

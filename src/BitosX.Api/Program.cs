@@ -149,11 +149,12 @@ if (capabilities.EmailVerificationEnabled)
     app.MapAuthEndpoints();
 }
 
-// Login endpoints (currently: POST /v1/auth/login) are mapped only when the Login capability is
-// enabled — independent of EmailVerification.
+// Login + protected account endpoints are mapped only when the Login capability is enabled —
+// independent of EmailVerification.
 if (capabilities.LoginEnabled)
 {
     app.MapLoginEndpoints();
+    app.MapAccountEndpoints();
 }
 
 // Capability state is logged safely at startup (booleans only, no secrets) and is

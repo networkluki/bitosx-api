@@ -10,12 +10,14 @@ Error responses use RFC7807 ProblemDetails. Every response carries an
 > ownership verification with account-password creation (`/v1/auth/register`,
 > `/v1/auth/verify-email`, `/v1/auth/resend-verification`), plus **login**
 > (`/v1/auth/login`), **refresh** (`/v1/auth/refresh`), **logout**
-> (`/v1/auth/logout`), and **logout-all** (`/v1/auth/logout-all`). **Session
-> listing, `/account/me`, delete-session, password reset, phone/SMS, sync, and
+> (`/v1/auth/logout`), **logout-all** (`/v1/auth/logout-all`), and the protected
+> account endpoints **`/v1/account/me`**, **`/v1/account/sessions`**, and
+> **`DELETE /v1/account/sessions/{id}`**. **Password reset, phone/SMS, sync, and
 > vault endpoints do not exist yet.** Registration/verification are exposed when
-> EmailVerification is configured; **login/refresh/logout are exposed
-> independently when the Login capability is enabled** (DB connection + JWT
-> signing key + kid), even without SMTP. The API otherwise stays health/version only.
+> EmailVerification is configured; **login/refresh/logout and the account
+> endpoints are exposed independently when the Login capability is enabled** (DB
+> connection + JWT signing key + kid), even without SMTP. The API otherwise stays
+> health/version only.
 
 ## `POST /v1/auth/register`
 
@@ -119,6 +121,48 @@ Missing/invalid token, or a token whose session is already revoked/expired → *
 **Authenticated.** Revokes **every** session for the account (from the validated JWT
 identity) and all their refresh tokens. No request body. → **204 No Content**. Missing/
 invalid token → **401**.
+
+## `GET /v1/account/me`
+
+**Authenticated.** Returns the caller's own profile, resolved from the validated JWT
+identity. → **200 OK**
+
+```json
+{ "accountId": "<guid>", "email": "user@example.com", "emailVerified": true, "createdAt": "2026-01-01T00:00:00Z" }
+```
+
+No other fields are exposed — no password hash, phone, disabled/updated state,
+normalized email, token, or session internals. Missing/invalid token, or a token whose
+session is revoked/expired → generic **401**.
+
+## `GET /v1/account/sessions`
+
+**Authenticated.** Lists **only the caller's own current-usable sessions** (a management
+view, not history): `revoked_at IS NULL ∧ absolute_expires_at > now ∧ (now − last_seen_at)
+< IdleLifetime` — the same authoritative predicate the session authenticator uses. → **200 OK**
+
+```json
+[ { "id": "<guid>", "createdAt": "…", "lastSeenAt": "…", "expiresAt": "…", "current": true } ]
+```
+
+- `expiresAt` is the **effective** expiry `min(absolute_expires_at, last_seen_at +
+  IdleLifetime)`, computed by the session service (not the endpoint).
+- `current` marks the calling session. Another account's sessions can never appear.
+- No user-agent, account id, refresh-token hash/verifier, chain id, or jti is exposed.
+- Missing/invalid token → **401**.
+
+## `DELETE /v1/account/sessions/{id}`
+
+**Authenticated.** Revokes one of the caller's own sessions (and its refresh tokens).
+Ownership is determined server-side from the validated JWT identity. → **204 No Content**.
+
+- A **nonexistent** session and a session **owned by another account** return the
+  **identical generic 404** (`application/problem+json`) — existence/ownership is never
+  disclosed, and another account's session is never affected.
+- A non-GUID `{id}` does not match the route (→ **404**), so a malformed id never reaches
+  the service. Missing/invalid token → **401**.
+- Deleting the caller's **current** session is allowed (effectively logout); the access
+  token's session is then gone and subsequent authenticated calls return **401**.
 
 ## `GET /health`
 
