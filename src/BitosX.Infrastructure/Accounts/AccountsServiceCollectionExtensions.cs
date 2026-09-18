@@ -2,6 +2,7 @@ using BitosX.Application.Abstractions.Persistence;
 using BitosX.Application.Accounts;
 using BitosX.Application.Email;
 using BitosX.Application.Security;
+using BitosX.Application.Sessions;
 using BitosX.Application.Verification;
 using BitosX.Infrastructure.Email;
 using BitosX.Infrastructure.Persistence;
@@ -243,6 +244,58 @@ public static class AccountsServiceCollectionExtensions
         services.AddSingleton<IArgon2Core, KonsciousArgon2Core>();
         services.AddSingleton<IAccountPasswordHasher>(sp =>
             new Argon2idPasswordHasher(sp.GetRequiredService<Argon2ParametersOptions>(), sp.GetRequiredService<IArgon2Core>()));
+        return services;
+    }
+
+    // ---- Login: JWT issuance/validation + refresh + session store + login/refresh/session services ----
+
+    /// <summary>
+    /// Composes the Login capability: access-JWT issuance, the single validation-parameters source,
+    /// SHA-256 refresh-token factory, the session store, and the login/refresh/session-management/
+    /// session-authentication application services. Fails closed via the SHARED validation path
+    /// (<see cref="BuildValidatedLoginConfiguration"/>) so it can never register a half-working login
+    /// stack from malformed/missing JWT or refresh config, even if invoked directly. Does NOT register
+    /// SMTP, email verification, JwtBearer, or any HTTP wiring, and opens no DB connection at
+    /// registration. Depends on AccountCore (IAccountPasswordHasher) and persistence (IAccountRepository)
+    /// being composed alongside it.
+    /// </summary>
+    public static IServiceCollection AddBitosxLogin(
+        this IServiceCollection services, IConfiguration configuration, string runtimeConnectionString)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(configuration);
+        if (string.IsNullOrWhiteSpace(runtimeConnectionString))
+        {
+            throw new ArgumentException("A non-blank runtime connection string is required for Login.", nameof(runtimeConnectionString));
+        }
+
+        // Fail closed: bind + fully validate JWT/refresh config BEFORE registering anything, using the
+        // exact same path DetectCapabilities uses (no drift). Any problem throws here — nothing registered.
+        var (jwt, refresh) = BuildValidatedLoginConfiguration(configuration);
+
+        // Construct the connection factory now (no connection is opened until a store method runs).
+        var connectionFactory = new BitosxConnectionFactory(runtimeConnectionString);
+
+        services.TryAddSingletonTimeProvider();
+        services.AddSingleton(jwt);
+        services.AddSingleton(refresh);
+
+        // Crypto / token primitives (Infrastructure): sign with the CURRENT key only, validate CURRENT
+        // + PREVIOUS via the single validation-parameters source; SHA-256(raw) refresh verifier.
+        services.AddSingleton<IAccessTokenService, JwtAccessTokenService>();
+        services.AddSingleton<JwtTokenValidationParametersFactory>();
+        services.AddSingleton<IRefreshTokenFactory, Sha256RefreshTokenFactory>();
+
+        // Session store (Dapper/MariaDB) — singleton over the runtime DML connection factory.
+        services.AddSingleton<ISessionStore>(sp =>
+            new SessionStore(connectionFactory, sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<RefreshTokenOptions>()));
+
+        // Application orchestration services (per-request).
+        services.AddScoped<ILoginService, LoginService>();
+        services.AddScoped<IRefreshService, RefreshService>();
+        services.AddScoped<ISessionManagementService, SessionManagementService>();
+        services.AddScoped<ISessionAuthenticator, SessionAuthenticator>();
+
         return services;
     }
 
