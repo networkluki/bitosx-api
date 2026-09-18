@@ -36,8 +36,13 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 // ---- RFC7807 ProblemDetails for all error responses ----
 builder.Services.AddProblemDetails();
 
-// ---- OpenAPI document (served at /openapi/v1.json) ----
-builder.Services.AddOpenApi();
+// ---- OpenAPI document (served at /openapi/v1.json) — DEVELOPMENT ONLY ----
+// Never registered or mapped in Production: the document (and any future interactive explorer) would leak
+// API shape. Enabling it in Production is a separate, explicit future security decision (Phase 2D.3).
+if (builder.Environment.IsDevelopment())
+{
+    builder.Services.AddOpenApi();
+}
 
 // ---- Forwarded headers: trust ONLY the local Apache reverse proxy (Phase 2D.1 client-IP model) ----
 // Production path is Cloudflare -> Apache -> Kestrel (loopback); Apache establishes the Cloudflare
@@ -75,6 +80,10 @@ builder.Services.AddSingleton<IProductVersionProvider>(
 var bitosxConnectionString = builder.Configuration.GetConnectionString("Bitosx");
 var capabilities = AccountsServiceCollectionExtensions.DetectCapabilities(builder.Configuration);
 builder.Services.AddSingleton(capabilities);
+
+// Fail closed in Production on an unsafe public-exposure posture: Login without hardening, or a
+// wildcard/public Kestrel listener. No-op in Development/Test. (Phase 2D.3)
+ProductionExposureValidation.Validate(builder.Environment, builder.Configuration, capabilities);
 
 if (capabilities.AccountCoreEnabled)
 {
@@ -139,7 +148,12 @@ if (capabilities.LoginEnabled)
     app.UseAuthorization();
 }
 
-app.MapOpenApi();
+// OpenAPI document is mapped ONLY in Development (see AddOpenApi gating above). In Production the route
+// is absent → a request returns normal 404, never an API document.
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+}
 
 // Unversioned infrastructure endpoints (/health, /version).
 app.MapInfrastructureEndpoints();

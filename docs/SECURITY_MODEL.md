@@ -280,10 +280,28 @@ unrestricted auth.
 The login-path control order is: trusted client-IP → per-IP → 4 KiB body → per-normalized-email →
 process-wide budget → credential/Argon2 admission → jitter → 200/401.
 
-**Deferred:** OpenAPI/public-exposure gating + Apache/Cloudflare origin review (**2D.3**); adaptive
-Turnstile/CAPTCHA (separately approved later). Registration/verification limits (`/register`,
-`/resend-verification`, `/verify-email`) and a global outbound-email budget remain future policy — no dead
-endpoint code is added. Kestrel stays **loopback-only** until Phase 2D is complete.
+**Implemented (2D.3 — public-exposure gating):**
+
+- **OpenAPI is Development-only.** `AddOpenApi`/`MapOpenApi` are gated behind `IsDevelopment()`; in
+  Production the `/openapi/v1.json` route is absent (normal 404). No production switch is introduced — a
+  future interactive-docs exposure is a separate, explicit decision.
+- **Production posture fails closed at startup** (`ProductionExposureValidation`): in the Production
+  environment, `LoginEnabled` requires `Security:PublicExposureHardening:Enabled = true`, and any
+  repository-controlled Kestrel/`urls` listener must be loopback-only — a wildcard/public
+  (`0.0.0.0`/`[::]`/`*`/`+`/public address) or malformed listener refuses to start. Development/Test are
+  unaffected.
+- **Host filtering** uses the built-in ASP.NET Core mechanism with `AllowedHosts =
+  127.0.0.1;localhost;api.bitosx.se`; `X-Forwarded-Host` is not trusted. TLS/HSTS are terminated upstream
+  (Cloudflare/Apache); Kestrel receives loopback HTTP and adds no `UseHttpsRedirection`/HSTS.
+
+The Cloudflare→Apache→loopback-Kestrel trust boundary and its host-side enforcement (Kestrel loopback
+binding, firewall, Apache real-IP config, secrets injection) are documented, with an app-enforced vs
+deployment-enforced checklist and verification commands, in [`DEPLOYMENT.md`](DEPLOYMENT.md).
+
+**Deferred:** adaptive Turnstile/CAPTCHA (separately approved later). Registration/verification limits
+(`/register`, `/resend-verification`, `/verify-email`) and a global outbound-email budget remain future
+policy — no dead endpoint code is added. Kestrel stays **loopback-only** and the public Apache/Cloudflare
+path must not be configured until the **[host]** items in `DEPLOYMENT.md` are verified.
 
 ## Known incomplete security work (must precede public account/auth go-live)
 
