@@ -88,7 +88,7 @@ public sealed class AccountStoreTests
         Assert.NotNull(view);
         Assert.Equal(r.ChallengeId, view!.ChallengeId);
 
-        var phc = _ctx.Hasher.Hash("my-chosen-password");
+        var phc = await _ctx.Hasher.HashAsync("my-chosen-password");
         _ctx.Clock.SetUtcNow(now);
         var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, phc);
         Assert.Equal(VerificationOutcome.Verified, outcome);
@@ -97,7 +97,7 @@ public sealed class AccountStoreTests
         Assert.Equal(1, await ScalarAsync("SELECT COUNT(*) FROM email_verification_challenges WHERE id=@id AND consumed_at IS NOT NULL", new { id = r.ChallengeId }));
 
         var storedHash = await PasswordHashAsync(r.AccountId);
-        Assert.Equal(BitosX.Application.Security.PasswordVerificationResult.Success, _ctx.Hasher.Verify("my-chosen-password", storedHash!));
+        Assert.Equal(BitosX.Application.Security.PasswordVerificationResult.Success, await _ctx.Hasher.VerifyAsync("my-chosen-password", storedHash!));
     }
 
     [Fact]
@@ -106,7 +106,7 @@ public sealed class AccountStoreTests
         await _fixture.ResetAsync();
         var now = AccountsTestContext.NowMicro();
         var r = await _ctx.RegisterAsync(now);
-        var phc = _ctx.Hasher.Hash("pw-123456789012");
+        var phc = await _ctx.Hasher.HashAsync("pw-123456789012");
         _ctx.Clock.SetUtcNow(now);
 
         Assert.Equal(VerificationOutcome.Verified, await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, phc));
@@ -124,7 +124,7 @@ public sealed class AccountStoreTests
         Assert.Null(await _ctx.VerificationStore.FindActiveChallengeByVerifierAsync(r.Verifier, afterExpiry));
         // Store reads authoritative time from its clock (set past expiry).
         _ctx.Clock.SetUtcNow(afterExpiry);
-        var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, _ctx.Hasher.Hash("pw-123456789012"));
+        var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, await _ctx.Hasher.HashAsync("pw-123456789012"));
         Assert.Equal(VerificationOutcome.InvalidOrExpired, outcome);
         Assert.Null(await PasswordHashAsync(r.AccountId));
     }

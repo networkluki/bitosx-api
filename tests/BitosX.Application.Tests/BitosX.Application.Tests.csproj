@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\BitosX.Application\BitosX.Application.csproj" />
+    <ProjectReference Include="..\..\src\BitosX.Contracts\BitosX.Contracts.csproj" />
   </ItemGroup>
 
 </Project>

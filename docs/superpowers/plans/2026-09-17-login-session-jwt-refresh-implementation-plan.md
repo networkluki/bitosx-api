@@ -5,9 +5,10 @@
 - **Status:** PLAN ONLY. No source, test, migration, secret, commit, or push changes. Awaiting approval.
 - **Date:** 2026-09-17
 - **Baseline:** `networkluki/bitosx-api` @ `main` = `origin/main` = `d80dabcaf42fc171b0a7981a0f8124c0a8e311bd` (clean tree).
-- **Approved design spec this plan implements:** `docs/superpowers/specs/2026-09-16-login-session-jwt-capability-gating-design.md` (all §16 decisions treated as approved: per-request session lookup revocation; session-scoped reuse revocation + 5s duplicate window; NO full dummy Argon2; HS256; `iss=https://api.bitosx.se` / `aud=bitosx-api`; 60s skew; defer rate limiting; no mandatory `0003`).
+- **Approved design spec this plan implements:** `docs/superpowers/specs/2026-09-16-login-session-jwt-capability-gating-design.md` (§16 decisions treated as approved: per-request session lookup revocation; session-scoped reuse revocation; NO full dummy Argon2; HS256; `iss=https://api.bitosx.se` / `aud=bitosx-api`; 60s skew; defer rate limiting; no mandatory `0003`).
+- **Auth design correction (2026-09-17, supersedes earlier text below):** (A) the refresh-token verifier is **`SHA-256(raw 32 token bytes)`** — **no `RefreshTokenPepper`, no HMAC** (the token is already 256 CSPRNG bits; SHA-256 matches the immutable `0001` contract `token_hash = SHA-256 of the opaque token`). (B) **strict reuse — there is NO 5-second grace window** (`ReuseGraceWindow`/`DuplicateWithinGrace` removed): ANY presentation of a token whose row is already `consumed_at`/`revoked_at` set is reuse → in the same transaction revoke that **session** (+ its still-active refresh tokens), commit, return generic invalid-refresh, issue no tokens. **Clients MUST single-flight refresh requests**; a true idempotent-retry protocol is a separate future design. `CanonicalBase64Secret` remains for the JWT signing keys only.
 - **Current prod capabilities (unchanged by Phase 2):** AccountCore=true, EmailVerification=true, EmailDelivery=false. Gmail SMTP stays deferred.
-- **Review decisions incorporated (2026-09-17):** **all §17 questions (1–9) are now RESOLVED** and folded into the affected sections. Additional approved directives folded in: **login request-body hardening** (§5.4), **refresh-pepper stability / no silent rotation** (§12.1), the **account-disable future invariant** (§19), and two final clarifications — **(A) previous-key config names** `Security:JwtPreviousSigningKey` / `Security:Jwt:PreviousKeyId` (paired, fail-closed) and **(B) `IAccessTokenService` is issuance-only** with a single shared `IJwtValidationParametersFactory` owning validation params (JwtBearer is the only validator). Phase 2A has **not** started: sequence is finalize plan → consistency review (done) → one approved docs-only local commit → then Phase 2A.
+- **Review decisions incorporated (2026-09-17):** **all §17 questions (1–9) are now RESOLVED** and folded into the affected sections. Additional approved directives folded in: **login request-body hardening** (§5.4), the **account-disable future invariant** (§19), and two final clarifications — **(A) previous-key config names** `Security:JwtPreviousSigningKey` / `Security:Jwt:PreviousKeyId` (paired, fail-closed) and **(B) `IAccessTokenService` is issuance-only** with a single shared `IJwtValidationParametersFactory` owning validation params (JwtBearer is the only validator). Phase 2A has **not** started: sequence is finalize plan → consistency review (done) → one approved docs-only local commit → then Phase 2A.
 - **Hardening pass incorporated (2026-09-17, post-review):** **(1)** the JWT validation-parameters factory lives in **Infrastructure**, never Application (Application references no IdentityModel/JwtBearer/`TokenValidationParameters`); **(2)** a dedicated **`AddBitosxLogin`** composition method (registered only when `LoginEnabled`) — `AddBitosxAccountCore` stays clean; **(3)** an explicit **`LoginEnabled` fail-closed matrix** (§3.5); **(4)** explicit **accounts→sessions→refresh_tokens** lock hierarchy via separate `FOR UPDATE` statements + pre-tx non-authoritative locator + deadlock handling (§6/§7); **(5)** strengthened **kid/alg fail-closed test matrix** incl. no all-keys fallback (§13.2); **(6)** updated Phase 2A file map (§14).
 
 ---
@@ -35,7 +36,7 @@
 
 ### 1.3 Security primitives (reuse, do not re-implement)
 - `IAccountPasswordHasher` (`Argon2idPasswordHasher`): `Verify` returns `Success | Failed | NeedsRehash | InvalidHashFormat`; validates PHC bounds **before** running Argon2; a `SemaphoreSlim(MaxConcurrency)` gate (prod cap=1) bounds concurrent hashing. **Login MUST reuse this**; no second hasher.
-- `HmacEmailVerificationTokenFactory`: `HMAC-SHA256(pepperBytes, tokenBytes)`, 256-bit tokens, Base64URL. **This is the shape the refresh token factory mirrors** — but with a *stricter* decoder (see §12).
+- `HmacEmailVerificationTokenFactory`: `HMAC-SHA256(pepperBytes, tokenBytes)`, 256-bit tokens, Base64URL. **The refresh-token factory reuses the 256-bit-token + strict-Base64URL shape** but computes a **plain `SHA-256(raw bytes)`** verifier (no pepper — see §12). (Email verification HMAC is a separate system and is unchanged.)
 - Email normalization: `EmailNormalizer.Normalize` + `EmailAddressValidator.IsValid` (reuse for login).
 
 ### 1.4 Test infrastructure (verified — reuse)
@@ -47,7 +48,7 @@
 
 ### 1.5 Current secrets present / absent
 - Present: `ConnectionStrings:Bitosx`, `ConnectionStrings:BitosxMigrator`, `Security:EmailVerificationPepper`, `Security:EmailOutboxKey`.
-- **Absent (needed for Phase 2, generated later, never in this milestone):** `Security:JwtSigningKey`, `Security:RefreshTokenPepper`.
+- **Absent (needed for Phase 2, generated later, never in this milestone):** `Security:JwtSigningKey` (the refresh token needs **no** secret — SHA-256 verifier).
 
 ---
 
@@ -76,11 +77,11 @@ Columns present: `email_verified_at`, `password_hash`, `disabled_at`, `normalize
 
 | Required transition | Representable? | How |
 |---|---|---|
-| Store verifier only (never plaintext) | ✅ | `token_hash` = HMAC-SHA256(pepper, rawBytes); 32 bytes fits VARBINARY(32) |
+| Store verifier only (never plaintext) | ✅ | `token_hash` = **SHA-256(raw token bytes)**; 32 bytes fits VARBINARY(32) (matches the `0001` contract) |
 | Lookup by presented token | ✅ | `WHERE token_hash=@verifier` (UNIQUE index → PK-grade lookup + lock) |
 | Rotate R0→R1 | ✅ | INSERT R1; `UPDATE R0 SET consumed_at=now, replaced_by_token_id=R1.id` |
 | Reuse detection | ✅ | presented token already has `consumed_at` (or `revoked_at`) set |
-| **5-second duplicate window** | ✅ | compare `now - consumed_at < 5s` — `consumed_at` is the authoritative source |
+| **Strict reuse (no grace)** | ✅ | any presented token with `consumed_at`/`revoked_at` set → session-scoped revocation in the same tx |
 | Revoke chain on reuse | ✅ (via session) | set `sessions.revoked_at`; all its tokens invalid by join |
 | Per-token expiry | ✅ | `expires_at` |
 
@@ -110,11 +111,14 @@ Runtime account is **database-level DML-only** (verified by `DatabasePrivilegeTe
   - `ISessionStore.CreateSessionOnLoginAsync(...)` performs the **post-Argon2 locked re-check + writes** in one transaction: `SELECT ... FOR UPDATE`, authoritative post-lock time, re-verify invariant **and that `password_hash` still equals the exact PHC string already verified**, then INSERT session + R0. It does **not** re-run Argon2.
 
 ### 3.3 New options (Decision 6 — names/values fixed)
+
+**Canonical Base64 secret representation (M-1, applies to `Security:JwtSigningKey` and `Security:JwtPreviousSigningKey`):** each is **canonical standard Base64** configuration text — standard Base64 alphabet, **no leading/trailing/embedded whitespace**, no alternate encoding — that **decodes to ≥ 32 bytes**; the key material is the **decoded bytes** (never a UTF-8 interpretation of the Base64 text). Validation is: reject null/blank → reject any whitespace → `Convert.FromBase64String` → require ≥ 32 decoded bytes → re-encode with `Convert.ToBase64String` and require exact `Ordinal` equality with the configured value → otherwise **fail closed** at composition. Values are **never trimmed or normalized**; malformed/non-canonical secret config is an operator error. (Implemented by the internal `CanonicalBase64Secret` parser in Infrastructure; the refresh token uses **no** Base64 secret — SHA-256 verifier; `EmailVerificationPepper`/`EmailOutboxKey` are unchanged by this.)
+
 - `Security/JwtOptions`:
-  - **Secrets (flat):** `Security:JwtSigningKey` (current, base64, ≥32 bytes; **required when LoginEnabled**), optional `Security:JwtPreviousSigningKey`.
+  - **Secrets (flat):** `Security:JwtSigningKey` (current, canonical Base64 → ≥32 decoded bytes; **required when LoginEnabled**), optional `Security:JwtPreviousSigningKey` (same representation).
   - **Non-secret (nested `Security:Jwt:*`):** `Security:Jwt:Issuer` = `https://api.bitosx.se`, `Security:Jwt:Audience` = `bitosx-api`, `Security:Jwt:AccessTokenLifetimeSeconds` = `900`, `Security:Jwt:ClockSkewSeconds` = `60`, `Security:Jwt:KeyId` (current kid, e.g. `k1`; **required when LoginEnabled**, kid is mandatory — Q5), optional `Security:Jwt:PreviousKeyId`.
   - **Previous-key pairing / fail-closed composition:** `Security:JwtPreviousSigningKey` is optional **unless** `Security:Jwt:PreviousKeyId` is set — the two must be **present together**; a partial previous-key configuration (one without the other) **fails closed** at startup. The current key + current kid are required when LoginEnabled; a missing/short current key fails closed. Sign only with the current key; verification may temporarily accept current + previous during the documented rotation overlap (§8).
-- `Security/RefreshTokenOptions` — **secret** `Security:RefreshTokenPepper` (flat, unchanged); non-secret `IdleLifetime` (default 30d), `AbsoluteLifetime` (default 90d), `ReuseGraceWindow` (default 5s). **The pepper is a stable server secret — never silently rotated (§12.1).**
+- `Security/RefreshTokenOptions` — **no secret** (the refresh verifier is `SHA-256(raw token bytes)`); non-secret policy only: `IdleLifetime` (default 30d), `AbsoluteLifetime` (default 90d). **No `ReuseGraceWindow`** — reuse is strict (§6/§7). SHA-256 is a fixed part of the protocol/storage, not a configurable option.
 
 ### 3.4 New Application services
 - `Sessions/LoginService` (`ILoginService`) — orchestrates §9.
@@ -124,23 +128,20 @@ Runtime account is **database-level DML-only** (verified by `DatabasePrivilegeTe
 
 ### 3.5 `LoginEnabled` capability — fail-closed detection matrix (Correction 3)
 
-Computed once in `DetectCapabilities` (never re-read in endpoints). **Primary enable secrets:** `Security:JwtSigningKey` and `Security:RefreshTokenPepper`.
+Computed once in `DetectCapabilities` (never re-read in endpoints). **Single primary enable secret:** `Security:JwtSigningKey` (the refresh token needs no secret).
 
-| `JwtSigningKey` | `RefreshTokenPepper` | Result |
-|---|---|---|
-| absent | absent | `LoginEnabled = false` (Login not requested) |
-| present | absent | **startup fails closed** (throw) |
-| absent | present | **startup fails closed** (throw) |
-| present | present | **Login requested → validate ALL login/JWT config (below); fail closed on any invalid item** |
+| `Security:JwtSigningKey` | Result |
+|---|---|
+| absent | `LoginEnabled = false` (Login not requested; any non-secret `Security:Jwt:*` metadata is inert — **except** a previous-key pair without a current key, which fails closed) |
+| present | **Login requested → validate ALL login/JWT config (below); fail closed on any invalid item** |
 
-**When Login is requested (both primary secrets present), require (else throw at startup):**
-- `Security:JwtSigningKey` decodes correctly and is **≥ 32 bytes** of key material.
+**When Login is requested (`Security:JwtSigningKey` present), require (else throw at startup):**
+- `Security:JwtSigningKey` canonical Base64 decoding to **≥ 32 bytes** of key material.
 - `Security:Jwt:KeyId` present and valid (non-blank; the mandatory current kid).
 - `Security:Jwt:Issuer` valid/non-blank.
 - `Security:Jwt:Audience` valid/non-blank.
 - `Security:Jwt:AccessTokenLifetimeSeconds` valid (> 0; default 900 if unset is acceptable — a present-but-invalid value throws).
 - `Security:Jwt:ClockSkewSeconds` valid (≥ 0; default 60 if unset).
-- `Security:RefreshTokenPepper` valid and **≥ 32 bytes**.
 
 **Previous-key rules (rotation):**
 - `Security:JwtPreviousSigningKey` and `Security:Jwt:PreviousKeyId` must be **both present or both absent** — a partial pair **fails closed**.
@@ -177,7 +178,7 @@ These rules mirror the existing EmailVerification partial-config fail-closed pol
 ### 4.4 Infrastructure (new)
 - `src/BitosX.Infrastructure/Security/JwtAccessTokenService.cs` (HS256 **issuance-only** via `JsonWebTokenHandler`; header carries current `kid`).
 - `src/BitosX.Infrastructure/Security/JwtTokenValidationParametersFactory.cs` (+ optional `src/BitosX.Infrastructure/Security/IJwtValidationParametersFactory.cs` — a concrete factory alone is acceptable if the interface adds no value) — the single shared `TokenValidationParameters` source (HS256-only, issuer/audience/60 s skew, mandatory-kid resolver over current+optional-previous, fail-closed). **Lives entirely in Infrastructure (Correction 1)**; consumed by `BitosX.Api`/JwtBearer in 2B and unit-tested in 2A. **`BitosX.Application` never references it or `TokenValidationParameters`.**
-- `src/BitosX.Infrastructure/Security/HmacRefreshTokenFactory.cs` (mirror of the email token factory, strict decode).
+- `src/BitosX.Infrastructure/Security/Sha256RefreshTokenFactory.cs` (256-bit CSPRNG token, strict Base64URL parser, `SHA-256(raw bytes)` verifier — no secret).
 - `src/BitosX.Infrastructure/Persistence/SessionStore.cs` (all session/refresh SQL — statements detailed inline in §5/§6/§7/§9).
 
 ### 4.5 Infrastructure (change) — separate `AddBitosxLogin` composition method (Correction 2)
@@ -201,7 +202,7 @@ These rules mirror the existing EmailVerification partial-config fail-closed pol
 
 ### 4.7 Tests (new) — TDD, added **before** the code they cover
 - `tests/BitosX.Application.Tests/` — `JwtAccessTokenServiceTests` unit is Infra; here: `LoginServiceTests`, `RefreshServiceTests`, `SessionManagementServiceTests`, `RefreshTokenParserTests` (via fakes), extend `Fakes.cs` with `FakeSessionStore`, `FakeAccessTokenService`, `FakeRefreshTokenFactory`.
-- `tests/BitosX.Infrastructure.Tests/` — `JwtAccessTokenServiceTests` (issuance), `JwtValidationParametersFactoryTests` (the single shared validator params + mandatory-kid/fail-closed cases), `HmacRefreshTokenFactoryTests`, `SessionStoreTests` (real `bitosx_test`), `RefreshRotationTests`, `RefreshReuseTests`, `RefreshConcurrencyTests`, `LoginStoreTests`, extend `AccountsTestContext`.
+- `tests/BitosX.Infrastructure.Tests/` — `JwtAccessTokenServiceTests` (issuance), `JwtValidationParametersFactoryTests` (the single shared validator params + mandatory-kid/fail-closed cases), `Sha256RefreshTokenFactoryTests`, `SessionStoreTests` (real `bitosx_test`), `RefreshRotationTests`, `RefreshReuseTests`, `RefreshConcurrencyTests`, `LoginStoreTests`, extend `AccountsTestContext`.
 - `tests/BitosX.Api.Tests/` — `LoginEndpointTests`, `RefreshEndpointTests`, `LogoutEndpointTests`, `SessionAuthorizationTests`, `AccountEndpointsTests`; a `LoginApiFactory` (sets JWT key + refresh pepper via `UseSetting`, ephemeral).
 
 ### 4.8 Docs (change, per phase)
@@ -269,15 +270,19 @@ Token row states: **Active** (`consumed_at IS NULL ∧ revoked_at IS NULL ∧ ex
    - **F — Authoritative time only after ALL locks held:** `now = TimeProvider.GetUtcNow()`.
    - **G — Re-evaluate ALL authoritative state under the locks** (never trust the step-A locator for security state):
      - If any locator row disappeared or no longer matches (C/D/E returned nothing, or FKs no longer line up) → **rollback → generic `Invalid`**.
-     - **Reuse classification (before freshness):** if refresh-token `consumed_at IS NOT NULL` OR `revoked_at IS NOT NULL`:
-       - `consumed_at IS NOT NULL ∧ (now − consumed_at) < ReuseGraceWindow (5s)` → **duplicate window**: rollback, issue nothing, **do not revoke** → `DuplicateWithinGrace` (generic 401). (Benign double-submit / rotation-race loser.)
-       - else (consumed ≥5s ago, or revoked) → **reuse detected**: `UPDATE sessions SET revoked_at=@now WHERE id=@sessionId AND revoked_at IS NULL;` then `UPDATE refresh_tokens SET revoked_at=@now WHERE session_id=@sessionId AND revoked_at IS NULL AND consumed_at IS NULL;` commit; `ReuseDetected` (generic 401 + `refresh.reuse_detected` log, §11.2). **Session-scoped only.**
+     - **Strict reuse classification (before freshness) — NO grace window:** if refresh-token `consumed_at IS NOT NULL` **OR** `revoked_at IS NOT NULL`, treat as reuse/compromise **immediately** (no time-based exception): `UPDATE sessions SET revoked_at=@now WHERE id=@sessionId AND revoked_at IS NULL;` then `UPDATE refresh_tokens SET revoked_at=@now WHERE session_id=@sessionId AND revoked_at IS NULL AND consumed_at IS NULL;` commit; `ReuseDetected` (generic 401 + `refresh.reuse_detected` log, §11.2), issue **no** access token and **no** refresh token. **Session-scoped only** (other device sessions untouched). See §6.2 for the security rationale and the single-flight client requirement.
      - **Freshness** (token Active): reject (rollback → `Invalid`) if `expires_at <= now` OR session `revoked_at IS NOT NULL` OR `absolute_expires_at <= now` OR `(now − last_seen_at) >= IdleLifetime (30d)` OR account `disabled_at IS NOT NULL`.
      - **Rotate:** conditional consume `UPDATE refresh_tokens SET consumed_at=@now WHERE id=@refreshTokenId AND consumed_at IS NULL;` → assert affected==1 (else rollback). INSERT R1 (`token_hash=newVerifier`, `expires_at=min(now+IdleLifetime, absolute_expires_at)`). `UPDATE refresh_tokens SET replaced_by_token_id=@r1 WHERE id=@refreshTokenId;`. `UPDATE sessions SET last_seen_at=@now WHERE id=@sessionId;`.
    - Commit. Return `{accountId, sessionId, r1Plaintext, r1ExpiresAt}`.
 4. After commit: `IAccessTokenService.Issue(accountId, sessionId, now)`; return `TokenResponse` with R1 + new access JWT.
 
-**R0 never becomes valid again:** after commit it is Consumed (and linked); any later presentation hits the reuse classification in step G.
+**R0 never becomes valid again:** after commit it is Consumed (and linked); any later presentation hits the strict reuse classification in step G.
+
+### 6.2 Why strict reuse (no grace window) — security-first MVP
+
+A non-revoking duplicate-grace window **preserves an attacker's successor token**: attacker steals R0 → refreshes first → receives R1; the legitimate client then retries R0 within the grace window → server rejects R0 **without revoking the session** → the attacker's R1 stays active. Strict reuse removes that hole: any second presentation of a consumed/revoked token revokes the whole session, invalidating the attacker's chain.
+
+**Accepted trade-offs:** a lost response after a successful rotation, or an accidental concurrent double-refresh, can self-revoke the session and force re-login. Therefore the **native desktop client MUST single-flight refresh requests** (one in-flight refresh at a time; queue/await rather than fire duplicates). A true idempotent refresh/retry protocol may be designed separately later if UX proves it necessary — **no implicit grace workaround is implemented.**
 
 **Deadlocks are still possible DB outcomes** (the explicit order minimizes but cannot eliminate them). On a deadlock/lock-timeout: the transaction is rolled back, **no token is issued/returned**, and the caller gets a generic failure. A **bounded retry** is permitted **only if explicitly designed and tested** (not assumed) — otherwise a single generic 401/temporary-failure is returned with no partial state.
 
@@ -285,7 +290,7 @@ Token row states: **Active** (`consumed_at IS NULL ∧ revoked_at IS NULL ∧ ex
 
 ## 7. Locking / concurrency model
 
-- **Two concurrent refreshes with same R0:** both reach step E (`SELECT … FOR UPDATE` on the same refresh-token row, UNIQUE `token_hash`). MariaDB serializes; winner consumes (affected==1) and commits R1; loser proceeds only after the winner's commit, re-reads under its own lock, sees `consumed_at` set → step-G reuse classification: within 5s → `DuplicateWithinGrace` (no revocation); ≥5s → reuse (revoke session). Immediate double-submit is **non-revoking**, satisfying the approved 5s window.
+- **Two concurrent refreshes with same R0:** both reach step E (`SELECT … FOR UPDATE` on the same refresh-token row, UNIQUE `token_hash`). MariaDB serializes; winner consumes (affected==1) and commits R1; loser proceeds only after the winner's commit, re-reads under its own lock, sees `consumed_at` set → **strict reuse → session revoked** (§6.1/§6.2). There is **no grace window**: a client that double-submits the same refresh can self-revoke its session, so clients **must single-flight** refresh requests.
 - **Refresh racing logout / logout-all:** both lock the **session** row (§6.1 step D / logout's explicit session lock). Whichever commits first wins. Logout first → refresh sees `revoked_at` → `Invalid`. Refresh first → logout still sets `revoked_at` (idempotent).
 - **`disabled_at` set while refresh waits for lock:** refresh re-reads account `disabled_at` under the step-C lock (post-lock `now`) → aborts with `Invalid`, no rotation. (The auth path fails closed on `disabled_at` regardless — per-request session join (§9) + refresh re-check. Proactive bulk-revoke-sessions-on-disable is **out of Phase 2 scope** — §19.)
 - **Absolute/idle expiry while refresh waits for lock:** evaluated against post-lock authoritative `now` (step F/G) → expired → `Invalid`, no partial issuance.
@@ -341,14 +346,14 @@ Token row states: **Active** (`consumed_at IS NULL ∧ revoked_at IS NULL ∧ ex
 ### 11.1 Errors (RFC7807 ProblemDetails, camelCase, `X-Correlation-ID` already added by middleware)
 - **Login failure (any of unknown / bad-password / invalid-email-format / unverified / disabled / null-password-hash — Decision 2):** identical `401` generic body — `title: "Unauthorized"`, `detail: "Invalid email or password."`. No distinction, no email existence signal.
 - **Transport-level input errors (distinct from credential outcomes):** malformed JSON / structurally invalid request → **`400`**; request body over the endpoint limit (4 KiB for auth endpoints, §5.4) → **`413`**. These precede credential evaluation and do not leak account state.
-- **Refresh failure (unknown/expired/revoked/reused/duplicate-in-grace/session-or-account-invalid):** identical `401` generic — `detail: "Invalid or expired refresh token."`.
+- **Refresh failure (unknown/expired/revoked/reused/session-or-account-invalid):** identical `401` generic — `detail: "Invalid or expired refresh token."`.
 - **Protected endpoint (missing/invalid token or invalid session):** generic `401`.
 - **`DELETE /account/sessions/{id}` for another account's (or nonexistent) session:** **`404`** generic (do not disclose ownership/existence). Own already-revoked session → `204` (idempotent, §18).
 - Never expose: token hashes, DB internals, SQL/crypto parse errors, account existence, disabled state, reuse-classification detail.
 
 ### 11.2 Logging (structured, single-line, correlation-scoped — existing `AddSimpleConsole`)
 - Safe events: `login.success` (accountId, sessionId), `login.failure` (reason-code **coarse**: `invalid_credentials` only — not which sub-condition; no email in plaintext), `session.created`, `refresh.success` (sessionId, new jti), `refresh.reuse_detected` (sessionId — **security event**, no token value), `session.revoked` (sessionId, reason), `logout_all` (accountId, count), `disabled_account.attempt` (accountId if known post-auth).
-- **Never log:** password, refresh token, access JWT, `Authorization` header, token hash, `JwtSigningKey`, `RefreshTokenPepper`, any vault data.
+- **Never log:** password, refresh token, access JWT, `Authorization` header, token hash, `JwtSigningKey`, any vault data.
 - **Normalized email in logs:** **omit before auth**, or log a **truncated HMAC/hash** if correlation is needed for abuse investigation. Prefer account/session IDs **after** authentication. Recommendation: pre-auth failures log no email (only correlation id + coarse reason); post-auth events log accountId/sessionId.
 
 ---
@@ -356,7 +361,7 @@ Token row states: **Active** (`consumed_at IS NULL ∧ revoked_at IS NULL ∧ ex
 ## 12. Token parser / HMAC model (refresh)
 
 - **Refresh token:** 256 bits CSPRNG (`RandomNumberGenerator.GetBytes(32)`), Base64URL **unpadded** transport.
-- **Store only** `HMAC-SHA256(RefreshTokenPepper_bytes, rawTokenBytes)` in `refresh_tokens.token_hash` (VARBINARY(32)). **HMAC the raw bytes, not the Base64 text** (raw bytes are available at generation and at parse).
+- **Store only** `SHA-256(raw 32 token bytes)` in `refresh_tokens.token_hash` (VARBINARY(32)). **Hash the raw bytes, not the Base64 text** (raw bytes are available at generation and at parse). **No pepper/secret** — the token is already 256 CSPRNG bits, so SHA-256 makes offline preimage recovery infeasible and matches the immutable `0001` contract.
 - **Strict parse before any DB/HMAC work (`TryComputeVerifier`):**
   - Reject `null`/empty; **bounded length** (43 chars = unpadded Base64URL of 32 bytes; reject anything not exactly 43, before decoding, to cap work).
   - Canonical **Base64URL unpadded** only: allow `[A-Za-z0-9_-]`; reject `+`, `/`, `=` padding, whitespace, and any non-canonical form (unlike the *permissive* email-token `Base64UrlDecode`, which re-pads and accepts `+//`; the refresh parser is deliberately stricter).
@@ -366,10 +371,10 @@ Token row states: **Active** (`consumed_at IS NULL ∧ revoked_at IS NULL ∧ ex
 - **Best-effort clear** the decoded 32-byte buffer (`CryptographicOperations.ZeroMemory`) after computing the verifier.
 - The **4 KiB body limit + 43-char length gate (§5.4)** apply to the refresh endpoint before parsing, capping parser work.
 
-### 12.1 Refresh-token pepper stability (no silent rotation — approved directive)
-- `Security:RefreshTokenPepper` is a **stable server secret** for Phase 2. It is loaded once and **never silently rotated** at runtime.
-- **Why:** `token_hash = HMAC-SHA256(pepper, rawBytes)` and lookup is by exact `token_hash`. Changing the pepper changes every verifier, so all existing refresh tokens would fail lookup at once (every session forced to re-login) unless a **previous-pepper verification overlap** is implemented (compute the candidate verifier under both current and previous peppers during a rollover window) — analogous to JWT previous-key overlap.
-- **Therefore:** pepper rotation is a **future, explicit, operator-initiated security operation** with its own overlap design — **not** an automatic Phase 2 feature. Documented here so no implementer treats the pepper as freely rotatable.
+### 12.1 No refresh-token secret (SHA-256 verifier)
+- The refresh-token verifier is `SHA-256(raw 32 token bytes)` — **there is no `RefreshTokenPepper` and no HMAC.** The 256-bit CSPRNG token is itself the entropy; SHA-256 yields the 32-byte `token_hash`.
+- **Consequence:** no pepper lifecycle, rotation, or recovery to manage; nothing to rotate or overlap. This removes a whole secret-management surface versus the earlier HMAC design.
+- Email-verification HMAC (`EmailVerificationPepper`) and future phone-OTP HMAC are **separate systems and unchanged** — only the refresh-token verifier changed.
 
 ---
 
@@ -431,10 +436,10 @@ Token row states: **Active** (`consumed_at IS NULL ∧ revoked_at IS NULL ∧ ex
 
 ### 13.4 REFRESH
 - valid R0 → R1 (200); R0 `consumed_at` set; `replaced_by_token_id`=R1; `session.last_seen_at` updated to authoritative now.
-- old R0 never accepted again (post-rotation presentation → 401).
-- concurrent double refresh (two tasks, same R0): exactly one gets R1; the other → generic 401 without revocation (within 5s) — assert session NOT revoked.
-- duplicate within 5s → 401, no token, **session not revoked**.
-- duplicate after 5s → reuse: session revoked, remaining active tokens revoked, 401.
+- old R0 never accepted again (post-rotation presentation → **strict reuse**: session revoked, remaining active tokens revoked, 401, no token issued).
+- concurrent double refresh (two tasks, same R0): exactly one gets R1; the loser presents the now-consumed R0 → **strict reuse → session revoked** (no grace window). Assert exactly one rotation succeeded and the session ends revoked.
+- any presentation of a `consumed_at`/`revoked_at` token → session-scoped revocation + remaining active tokens revoked + 401 + no token (verify a benign immediate double-submit ALSO revokes — there is no grace exception).
+- reuse revocation is **session-scoped only** — a second unrelated session for the same account stays active.
 - revoked session presented → 401.
 - disabled account mid-refresh → 401, no rotation.
 - idle-expired / absolute-expired → 401.
@@ -451,7 +456,7 @@ Token row states: **Active** (`consumed_at IS NULL ∧ revoked_at IS NULL ∧ ex
 - `DELETE /sessions/{ownId}` → 204; session revoked.
 - `DELETE /sessions/{otherAccountId'sSession}` → 404 (no ownership disclosure).
 - `DELETE /sessions/{nonexistent}` → 404.
-- `GET /sessions` → lists only caller's sessions; `current=true` for the calling session; no hashes/chain-ids/jti/raw internals.
+- `GET /sessions` → lists only the caller's **current usable** sessions — a management view, not history: `revoked_at IS NULL ∧ absolute_expires_at > now ∧ (now − last_seen_at) < IdleLifetime` (same predicate as `SessionAuthenticator`; `absolute == now` and idle `== IdleLifetime` excluded). `current=true` for the calling session; **`ExpiresAt` = the effective expiry `min(absolute_expires_at, last_seen_at + IdleLifetime)`**; no user-agent/account-id/hashes/chain-ids/jti/raw internals.
 - `GET /me` → `{accountId, email, emailVerified, createdAt}` only; no password/token/session internals.
 
 ### 13.6 ZERO KNOWLEDGE
@@ -459,10 +464,10 @@ Token row states: **Active** (`consumed_at IS NULL ∧ revoked_at IS NULL ∧ ex
 - login accepts only account password; no vault key/master-password parameter anywhere in the login path.
 
 ### 13.7 CAPABILITY GATING — `LoginEnabled` fail-closed matrix (Correction 3; extend existing)
-- **DetectCapabilities matrix (§3.5):** neither primary secret → `LoginEnabled=false`; `JwtSigningKey` only → **throws**; `RefreshTokenPepper` only → **throws**; both present + all config valid → `LoginEnabled=true`.
-- **Login requested but invalid config → throws:** `JwtSigningKey` < 32 bytes / undecodable; missing/blank `Security:Jwt:KeyId`; blank `Issuer`; blank `Audience`; invalid `AccessTokenLifetimeSeconds`; invalid `ClockSkewSeconds`; `RefreshTokenPepper` < 32 bytes.
+- **DetectCapabilities matrix (§3.5):** `JwtSigningKey` absent → `LoginEnabled=false`; `JwtSigningKey` present + all config valid → `LoginEnabled=true`. (No `RefreshTokenPepper` — the refresh token has no secret.)
+- **Login requested but invalid config → throws:** `JwtSigningKey` < 32 bytes / undecodable / non-canonical / whitespace; missing/blank `Security:Jwt:KeyId`; blank `Issuer`; blank `Audience`; invalid `AccessTokenLifetimeSeconds`; invalid `ClockSkewSeconds`.
 - **Previous-key pairing:** `JwtPreviousSigningKey` without `PreviousKeyId` (and vice-versa) → **throws**; a previous-key pair present without valid current login config → **throws**; both previous present + valid → `LoginEnabled=true` with rotation overlap.
-- **Non-secret metadata tolerance:** `Security:Jwt:KeyId` present while both primary secrets absent → `LoginEnabled=false`, **no throw** (inert metadata).
+- **Non-secret metadata tolerance:** `Security:Jwt:KeyId` present while `JwtSigningKey` absent → `LoginEnabled=false`, **no throw** (inert metadata) — except a previous-key pair without a current key, which throws.
 - **`AddBitosxLogin` composition:** registered only when `LoginEnabled`; registers issuance service, validation-params factory, refresh factory, session store, login/refresh/session-management services, session authenticator, options — and **`AddBitosxAccountCore` gains none of these** (Correction 2). Endpoints mapped only when `LoginEnabled`; absent → routes 404.
 - **Login works with EmailDelivery disabled** (current prod shape): AccountCore + Login present, SMTP absent → login/refresh/logout/me/sessions all function; register/resend still 503; verify-email still mapped.
 
@@ -472,7 +477,7 @@ Token row states: **Active** (`consumed_at IS NULL ∧ revoked_at IS NULL ∧ ex
 
 - **Phase 2A — primitives + persistence state machines + composition (NO HTTP). Conceptual add/change map (Correction 6):**
   - **APPLICATION (add):** `IAccessTokenService` (BitosX-owned types only), `IRefreshTokenFactory`, `JwtOptions`/`RefreshTokenOptions` (POCO), `ISessionStore`, `LoginService`/`RefreshService`/`SessionManagementService`, `ISessionAuthenticator`. **No IdentityModel/`TokenValidationParameters` types in Application (Correction 1).**
-  - **INFRASTRUCTURE (add):** `JwtAccessTokenService` (issuance-only, mandatory `kid`), `JwtTokenValidationParametersFactory` (+ optional `IJwtValidationParametersFactory`) — the single shared validation params, **Infrastructure-resident**; `HmacRefreshTokenFactory` (strict parser); `SessionStore` (explicit accounts→sessions→refresh_tokens lock hierarchy per Correction 4: login-create non-locking-read + locked exact-PHC re-check; rotate/reuse; logout/logout-all/list/delete/auth-lookup); **`AddBitosxLogin` composition method** (Correction 2, registered only when `LoginEnabled`; `AddBitosxAccountCore` stays clean); **`LoginEnabled` detection + fail-closed validation** in `DetectCapabilities`/`AccountCapabilities` (§3.5 matrix).
+  - **INFRASTRUCTURE (add):** `JwtAccessTokenService` (issuance-only, mandatory `kid`), `JwtTokenValidationParametersFactory` (+ optional `IJwtValidationParametersFactory`) — the single shared validation params, **Infrastructure-resident**; `Sha256RefreshTokenFactory` (strict parser, SHA-256 verifier, no secret); `SessionStore` (explicit accounts→sessions→refresh_tokens lock hierarchy per Correction 4: login-create non-locking-read + locked exact-PHC re-check; rotate/**strict reuse**; logout/logout-all/list/delete/auth-lookup); **`AddBitosxLogin` composition method** (Correction 2, registered only when `LoginEnabled`; `AddBitosxAccountCore` stays clean); **`LoginEnabled` detection + fail-closed validation** in `DetectCapabilities`/`AccountCapabilities` (§3.5 matrix).
   - Add the `Microsoft.IdentityModel.JsonWebTokens` / `Microsoft.IdentityModel.Tokens` references to **Infrastructure** (pinned) + lockfile update.
   - **Tests:** all unit (issuance + the shared validation factory incl. §13.2 kid/alg fail-closed matrix, refresh parser) + store/concurrency/reuse/login-race + `LoginEnabled` capability matrix (§13.7). **No endpoints mapped, no JwtBearer wiring, no secrets generated.**
 - **Phase 2B — login + JWT issuance + session authorization:**
@@ -511,7 +516,7 @@ Each phase: TDD RED→GREEN, then the full gate; **local commits only, no push u
 
 Proposed commit sequence (each compiles + green):
 1. `feat: JWT issuance service + Infrastructure validation-parameters factory (HS256, mandatory kid, rotation overlap) + tests` (adds Microsoft.IdentityModel.JsonWebTokens/Tokens to Infrastructure, pinned + lockfile; no Application dependency on IdentityModel)
-2. `feat: HMAC refresh-token factory with strict Base64URL parser + tests`
+2. `feat: SHA-256 refresh-token factory (no secret) with strict Base64URL parser + tests`
 3. `feat: session store — login create (Argon2-outside-lock, explicit accounts→sessions→refresh_tokens locks) + refresh rotation/reuse state machine + tests`
 4. `feat: login/refresh/session-management application services + tests`
 5. `feat: AddBitosxLogin composition + LoginEnabled fail-closed capability detection (AccountCore stays clean) + tests`  *(end of 2A)*
@@ -529,10 +534,10 @@ Rate-limiting/DoS (2D) is its own separately-approved series.
 1. **JWT dependency — RESOLVED (Decision 1):** `Microsoft.IdentityModel.JsonWebTokens` in Infrastructure (issuance); **`Microsoft.AspNetCore.Authentication.JwtBearer` in Api** for protected-endpoint auth (no custom bearer middleware). Pinned versions, `packages.lock.json` updated, locked restore must pass, each reference only in its consuming project. (§3.2, §4.4/§4.6/§4.9, §8, §9)
 2. **Malformed login email — RESOLVED (Decision 2):** same generic **401** as all login failures; malformed JSON → 400; oversized body → 413; strict bounded lengths before normalize/hash. (§5.1, §5.4, §11.1)
 3. **Argon2 vs DB lock — RESOLVED (Decision 3):** Argon2 runs **OUTSIDE** any transaction/row lock; after a successful verify, begin tx → `SELECT ... FOR UPDATE` → re-check invariant **and exact-PHC equality** → create session+R0 → commit → issue tokens. Never re-run Argon2 under lock. Race documented. (§5.1, §5.2, §10)
-6. **Config names — RESOLVED (Decision 6):** keep flat `Security:JwtSigningKey` / `Security:RefreshTokenPepper`; non-secret `Security:Jwt:Issuer=https://api.bitosx.se`, `Audience=bitosx-api`, `AccessTokenLifetimeSeconds=900`, `ClockSkewSeconds=60`; kid IDs non-secret; sign current-only; previous-key overlap ≥ lifetime+skew (960 s). (§3.3, §8)
+6. **Config names — RESOLVED (Decision 6), then corrected 2026-09-17:** flat `Security:JwtSigningKey` (the `Security:RefreshTokenPepper` originally listed here was **removed** — the refresh verifier is SHA-256 with no secret); non-secret `Security:Jwt:Issuer=https://api.bitosx.se`, `Audience=bitosx-api`, `AccessTokenLifetimeSeconds=900`, `ClockSkewSeconds=60`; kid IDs non-secret; sign current-only; previous-key overlap ≥ lifetime+skew (960 s). (§3.3, §8)
 8. **Session `user_agent` — RESOLVED (Decision 8):** omit raw UA from `GET /v1/account/sessions`; DTO = `id, createdAt, lastSeenAt, expiresAt, current`; raw UA stays internal to persistence; sanitized device label designed later. (§4.1 `SessionResponse`, §13.5)
 
-**Also incorporated (approved directives):** request-body hardening — 4 KiB per auth request + strict field-length gates before normalize/parse/hash/DB (§5.4, §13.1a); refresh-pepper stability — stable secret, no silent rotation, future explicit overlap operation (§12.1).
+**Also incorporated (approved directives):** request-body hardening — 4 KiB per auth request + strict field-length gates before normalize/parse/hash/DB (§5.4, §13.1a); **refresh verifier = SHA-256(raw token bytes), no secret; strict reuse with no grace window (§12.1/§6.2)** — supersedes the earlier HMAC-pepper + 5s-grace design.
 
 ### Resolved by the 2026-09-17 final decisions (incorporated above)
 4. **`NeedsRehash` on login — RESOLVED (Q4): DEFER opportunistic re-hash.** `Success` and `NeedsRehash` are **both successful** password-verification outcomes; login continues normally. **No second Argon2 hash and no `UPDATE accounts.password_hash` in the login path** (CPU-constrained host; Argon2 already concurrency-bounded). `Failed`/`InvalidHashFormat` remain generic login failure. A future dedicated password-hash-upgrade policy handles upgrades explicitly. Optional safe observability: a structured maintenance metric/event that an authenticated account uses a hash needing upgrade — **account ID only, after auth succeeds; never log password/PHC string/normalized email/hash parameters.** (§5.1, §11.2, §13.1)
@@ -549,7 +554,7 @@ Rate-limiting/DoS (2D) is its own separately-approved series.
 - Login-capability, disable → `accounts.email_verified_at / password_hash / disabled_at`.
 - Session create/idle/absolute/revoke/list → `sessions.created_at / last_seen_at / absolute_expires_at / revoked_at` + `ix_sessions_account_id`.
 - Refresh store-verifier/lookup/rotate/link/reuse/expiry → `refresh_tokens.token_hash (VARBINARY(32) UNIQUE) / consumed_at / revoked_at / replaced_by_token_id / expires_at` + `ix_refresh_tokens_session_id`.
-- **5-second duplicate window** → `now - consumed_at` (schema already stores `consumed_at` at microsecond precision, `DATETIME(6)`).
+- **Strict reuse (no grace)** → `consumed_at`/`revoked_at` presence drives immediate session-scoped revocation; no time comparison needed.
 - Per-request revocation → PK read of `sessions.id` + account join.
 - Session-scoped reuse revocation → `UPDATE sessions ... WHERE id=@sid` + `UPDATE refresh_tokens ... WHERE session_id=@sid`.
 - DML-only runtime grants already cover all INSERT/UPDATE/SELECT (no DDL, no grant change).
@@ -570,7 +575,7 @@ Rate-limiting/DoS (2D) is its own separately-approved series.
 
 Verified **absent** (no residual claim that): opportunistic rehash occurs on login; kid is optional; migration `0003` is planned for Phase 2; Login must wait for Phase 2D; raw `user_agent` appears in the session response; custom bearer middleware is used; Argon2 runs while holding login DB locks.
 
-Verified **consistently stated**: Argon2 verification outside transaction/lock; exact-PHC re-check under account lock; mandatory kid (HS256-only, unknown/missing kid → 401); HS256 only; 15-minute (900 s) access token; 60 s clock skew; 30-day idle session lifetime; 90-day absolute lifetime; 5-second non-revoking duplicate refresh window; session-scoped refresh reuse revocation; no migration `0003`; no public exposure before Phase 2D (loopback-only); zero-knowledge boundary unchanged (login accepts only the account password; no vault material in DTOs/stores/claims/logs).
+Verified **consistently stated**: Argon2 verification outside transaction/lock; exact-PHC re-check under account lock; mandatory kid (HS256-only, unknown/missing kid → 401); HS256 only; 15-minute (900 s) access token; 60 s clock skew; 30-day idle session lifetime; 90-day absolute lifetime; **refresh verifier = SHA-256(raw token bytes), no pepper**; **strict session-scoped reuse revocation on any consumed/revoked-token reuse (no grace window; single-flight client required)**; no migration `0003`; no public exposure before Phase 2D (loopback-only); zero-knowledge boundary unchanged (login accepts only the account password; no vault material in DTOs/stores/claims/logs).
 
 **Final clarifications (2026-09-17) verified applied:** (A) previous-key config uses exactly `Security:JwtSigningKey` / `Security:JwtPreviousSigningKey` (secrets) and `Security:Jwt:KeyId` / `Security:Jwt:PreviousKeyId` (non-secret); previous secret + previous kid are paired and **fail closed** on partial config; current key + current kid required when LoginEnabled; sign current-only; verify current+previous during overlap; retire previous key+kid together. (B) `IAccessTokenService` is **issuance-only** (no production `Validate()`); a single shared `IJwtValidationParametersFactory` (`JwtTokenValidationParametersFactory`) produces the `TokenValidationParameters` for JwtBearer; Phase 2A unit-tests that factory, never a second validator. No stale `JwtSigningKeyPrevious` or `BuildValidationParameters()` references remain.
 

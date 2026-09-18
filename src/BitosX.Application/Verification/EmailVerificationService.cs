@@ -85,7 +85,7 @@ public sealed class EmailVerificationService : IEmailVerificationService
         }
 
         // Phase B — expensive hash, no DB lock held.
-        var phc = _hasher.Hash(command.Password);
+        var phc = await _hasher.HashAsync(command.Password, cancellationToken).ConfigureAwait(false);
 
         // Phase C — authoritative transaction. The store acquires the row lock and reads
         // its own authoritative timestamp AFTER the lock is held (so a token that expired

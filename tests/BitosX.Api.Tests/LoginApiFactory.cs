@@ -1,0 +1,122 @@
+using System.Net.Http.Json;
+using System.Security.Cryptography;
+using BitosX.Application.Email;
+using BitosX.Contracts.Accounts;
+using BitosX.Infrastructure.Email;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
+using MySqlConnector;
+
+namespace BitosX.Api.Tests;
+
+/// <summary>
+/// Boots the API against the isolated bitosx_test DB with the <b>Login</b> capability enabled
+/// (ephemeral JWT signing key + kid) in addition to EmailVerification/EmailDelivery (capturing
+/// sender, background dispatcher removed). Used to exercise the full register → verify → login
+/// flow end-to-end. Secrets are ephemeral and obviously test-only.
+/// </summary>
+public sealed class LoginApiFactory : WebApplicationFactory<Program>
+{
+    internal CapturingEmailSender Emails { get; } = new();
+
+    private readonly string _testDbConnectionString;
+
+    public LoginApiFactory()
+    {
+        var cfg = new ConfigurationBuilder().AddUserSecrets("bitosx-infrastructure-tests").Build();
+        _testDbConnectionString = cfg.GetConnectionString("BitosxTest")
+            ?? throw new InvalidOperationException("ConnectionStrings:BitosxTest not configured for tests.");
+    }
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.UseEnvironment("Testing");
+
+        builder.UseSetting("ConnectionStrings:Bitosx", _testDbConnectionString);
+        builder.UseSetting("Security:EmailVerificationPepper", "test-pepper-" + Convert.ToBase64String(RandomNumberGenerator.GetBytes(24)));
+        builder.UseSetting("Security:EmailOutboxKey", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
+
+        // Login capability: current signing key (>=32 bytes) + mandatory kid. Ephemeral per run.
+        builder.UseSetting("Security:JwtSigningKey", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
+        builder.UseSetting("Security:Jwt:KeyId", "test-k1");
+
+        builder.UseSetting("Security:Argon2:MemoryKiB", "8192");
+        builder.UseSetting("Security:Argon2:Iterations", "1");
+        builder.UseSetting("Security:Argon2:MaxConcurrency", "2");
+        builder.UseSetting("Email:SmtpHost", "smtp.gmail.com");
+        builder.UseSetting("Email:SmtpPort", "587");
+        builder.UseSetting("Email:SmtpUsername", "test-user");
+        builder.UseSetting("Email:SmtpAppPassword", "test-app-password");
+        builder.UseSetting("Email:FromAddress", "bitosx@example.com");
+        builder.UseSetting("Email:PublicBaseUrl", "https://vault.bitosx.se");
+
+        builder.ConfigureTestServices(services =>
+        {
+            services.RemoveAll<IHostedService>();
+            services.RemoveAll<IEmailSender>();
+            services.AddSingleton<IEmailSender>(Emails);
+        });
+    }
+
+    public async Task ResetDatabaseAsync()
+    {
+        Emails.Sent.Clear();
+        await using var c = new MySqlConnection(_testDbConnectionString);
+        await c.OpenAsync();
+        await using var cmd = c.CreateCommand();
+        // Children first (FKs): refresh_tokens -> sessions -> accounts; outbox references accounts.
+        cmd.CommandText = "DELETE FROM refresh_tokens; DELETE FROM sessions; DELETE FROM email_outbox; DELETE FROM accounts;";
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public async Task<T> QueryScalarAsync<T>(string sql, string paramName, object value)
+    {
+        await using var c = new MySqlConnection(_testDbConnectionString);
+        await c.OpenAsync();
+        await using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.AddWithValue(paramName, value);
+        var result = await cmd.ExecuteScalarAsync();
+        return (T)Convert.ChangeType(result!, typeof(T));
+    }
+
+    /// <summary>
+    /// Registers + verifies an account through the real endpoints and returns its email. The password
+    /// is set at verify time (email-first registration). Drives one dispatch to compose the email.
+    /// </summary>
+    public async Task<string> CreateVerifiedAccountAsync(HttpClient client, string password)
+    {
+        var email = $"user-{Guid.NewGuid():N}@example.com";
+
+        var register = await client.PostAsJsonAsync("/v1/auth/register", new { email });
+        register.EnsureSuccessStatusCode();
+
+        using (var scope = Services.CreateScope())
+        {
+            await scope.ServiceProvider.GetRequiredService<IEmailOutboxDispatcher>().ProcessDueOnceAsync();
+        }
+
+        var token = CapturingEmailSender.ExtractToken(Emails.Sent[^1]);
+        var verify = await client.PostAsJsonAsync("/v1/auth/verify-email", new { token, password });
+        verify.EnsureSuccessStatusCode();
+        return email;
+    }
+
+    /// <summary>Logs in through the production endpoint and returns the token pair (starts a session).</summary>
+    public static async Task<TokenResponse> LoginAsync(HttpClient client, string email, string password)
+    {
+        var resp = await client.PostAsJsonAsync("/v1/auth/login", new { email, password });
+        resp.EnsureSuccessStatusCode();
+        return (await resp.Content.ReadFromJsonAsync<TokenResponse>())!;
+    }
+
+    /// <summary>Number of currently-non-revoked sessions for an account (by normalized email).</summary>
+    public Task<long> ActiveSessionCountAsync(string email) => QueryScalarAsync<long>(
+        "SELECT COUNT(*) FROM sessions s JOIN accounts a ON a.id=s.account_id WHERE a.normalized_email=@e AND s.revoked_at IS NULL",
+        "@e", email.ToUpperInvariant());
+}

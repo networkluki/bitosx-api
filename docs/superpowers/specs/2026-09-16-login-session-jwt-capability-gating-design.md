@@ -5,6 +5,8 @@
 - **Baseline:** `networkluki/bitosx-api` @ `main` `65d2b2c`.
 - **Scope:** (1) decouple Account/Auth from SMTP via capability-based composition; (2) design Login / Session / Refresh / Logout / account-session management + JWT. **Gmail SMTP is deferred** (outbound 25/465/587 blocked at the Linode network level; confirmed). No Login/JWT implementation in this milestone.
 
+> **⚠️ SUPERSEDED IN PART (2026-09-17) — the implementation plan `docs/superpowers/plans/2026-09-17-login-session-jwt-refresh-implementation-plan.md` is authoritative.** Two refresh-token decisions in this spec were corrected: **(1)** the refresh-token verifier is **`SHA-256(raw 32 token bytes)`** with **no `RefreshTokenPepper` and no HMAC** (the 256-bit CSPRNG token makes plain SHA-256 adequate and matches the immutable `0001` `token_hash = SHA-256 of the opaque token` contract) — so there is **no** refresh-token secret and `LoginEnabled` depends only on `Security:JwtSigningKey`; **(2)** refresh reuse is **strict with no grace window** — any presentation of a `consumed_at`/`revoked_at` token triggers session-scoped revocation (the "rotation grace" idea below is **not** implemented; clients must single-flight refresh). Email-verification HMAC (and future phone-OTP HMAC) are separate systems and remain unchanged. Where this spec says HMAC-pepper, rotation grace, or a `RefreshTokenPepper` secret, read the plan instead.
+
 ---
 
 ## 1. Current architecture observations
@@ -23,7 +25,7 @@ Three independent capabilities, each with its own DI extension and its own requi
 
 | Capability | Enable condition | Provides | Endpoints |
 |---|---|---|---|
-| **AccountCore** | `ConnectionStrings:Bitosx` present (+ `Security:JwtSigningKey` + `Security:RefreshTokenPepper` once Login ships) | DB persistence, password hasher, account lookup, JWT service, session/refresh services | `/v1/auth/login`, `/refresh`, `/logout`, `/logout-all`, `/v1/account/*` |
+| **AccountCore** | `ConnectionStrings:Bitosx` present (+ `Security:JwtSigningKey` once Login ships — **no refresh secret**, per the 2026-09-17 correction) | DB persistence, password hasher, account lookup, JWT service, session/refresh services | `/v1/auth/login`, `/refresh`, `/logout`, `/logout-all`, `/v1/account/*` |
 | **EmailVerification** | AccountCore **and** `Security:EmailVerificationPepper` **and** `Security:EmailOutboxKey` | token factory, outbox payload crypto, registration/verification/resend services, outbox persistence | `/v1/auth/verify-email` always; `/register` + `/resend-verification` gated by EmailDelivery (see §3/§4) |
 | **EmailDelivery** | EmailVerification **and** SMTP creds (`Email:SmtpUsername` + `Email:SmtpAppPassword` + host/port) | MailKit Gmail sender + background outbox dispatcher | (no endpoints; it powers delivery of enqueued mail) |
 
@@ -69,7 +71,7 @@ This lets **Login run with SMTP disabled** (AccountCore needs no SMTP), which is
 ## 6. Session model (existing schema; no change required)
 - **Session = one login on one device.** `sessions.absolute_expires_at = created_at + 90d` (hard cap). **Idle expiry** enforced via `last_seen_at + 30d`: `last_seen_at` is updated on each successful refresh; a refresh is rejected if `now > last_seen_at + 30d`. Refresh tokens carry `expires_at = min(now + 30d idle window, session.absolute_expires_at)`.
 - **Revocation:** `sessions.revoked_at` (single session), or set for all account sessions (logout-all / disable). A revoked or expired session invalidates its refresh tokens and (via §10) its access tokens.
-- **Refresh token hashing:** store `HMAC-SHA256(RefreshTokenPepper, tokenBytes)` in `token_hash` (VARBINARY(32) fits). Rationale (explicit): a 256-bit opaque token makes plain SHA-256 adequate, but HMAC+pepper adds defense-in-depth (a DB-only leak yields verifiers useless without the out-of-DB pepper) and is consistent with the email-verification design. Requires a new secret `Security:RefreshTokenPepper` (independent).
+- **Refresh token hashing (CORRECTED 2026-09-17):** store **`SHA-256(raw 32 token bytes)`** in `token_hash` (VARBINARY(32) fits). The 256-bit opaque CSPRNG token makes plain SHA-256 adequate for offline-preimage resistance, matches the immutable `0001` contract, and removes the secret-lifecycle/rotation complexity of a pepper. **No `RefreshTokenPepper`, no HMAC.** *(This overrides the earlier HMAC-pepper proposal that previously sat here.)*
 
 The schema supports session creation, refresh rotation, previous-token linkage (`replaced_by_token_id`), reuse detection (`consumed_at`), session revocation (`revoked_at`), logout-all (revoke all sessions for account), absolute expiry, idle expiry, and disabled-account revocation — **without schema changes** (see §12).
 
@@ -141,7 +143,7 @@ Login is an expensive **unauthenticated** endpoint; with Argon2 `maxConcurrency=
   - `ALTER TABLE sessions ADD COLUMN revoked_reason VARCHAR(32) NULL` (values: `logout`, `logout_all`, `reuse_detected`, `disabled`, `superseded`) for audit/telemetry.
   - (Only if Option 3 revocation is later chosen: `sessions.token_version INT NOT NULL DEFAULT 0`.)
   - A composite index to speed session listing (`sessions(account_id, revoked_at)`) if `/account/sessions` volume warrants.
-- `0001`/`0002` are immutable; any change is a new `0003` authored + reviewed separately. `refresh_tokens.token_hash VARBINARY(32)` already fits the HMAC verifier — no change.
+- `0001`/`0002` are immutable; any change is a new `0003` authored + reviewed separately. `refresh_tokens.token_hash VARBINARY(32)` already fits the **SHA-256** verifier (correction 2026-09-17) — no change.
 
 ---
 
@@ -166,8 +168,8 @@ Login is an expensive **unauthenticated** endpoint; with Argon2 `maxConcurrency=
 ## 15. Proposed implementation phases
 1. **Capability-gating refactor** — split `AddBitosxAccounts` into AccountCore/EmailVerification/EmailDelivery; `Program.cs` flags; `AccountCapabilities` singleton; `/health` capability booleans; SMTP-deferred behavior (Option B). *(Re-enables register/verify appropriately and unblocks Login composition; no login endpoints yet.)*
 2. **JWT service** — signing key handling (+ rotation), claims, issue/validate, clock skew. New secret `Security:JwtSigningKey`.
-3. **Login** — `POST /v1/auth/login`; session + `R0` creation stores; new secret `Security:RefreshTokenPepper`.
-4. **Refresh rotation + reuse detection** — `POST /v1/auth/refresh`; transactional rotation, reuse → session revoke, concurrency.
+3. **Login** — `POST /v1/auth/login`; session + `R0` creation stores. *(No `RefreshTokenPepper` — SHA-256 verifier; correction 2026-09-17.)*
+4. **Refresh rotation + reuse detection** — `POST /v1/auth/refresh`; transactional rotation, **strict reuse** (any consumed/revoked-token presentation → session revoke; no grace window), concurrency.
 5. **Logout / logout-all** + per-request session validation (auth handler that loads the session by `sid`).
 6. **Account/session management** — `GET /v1/account/me`, `GET /v1/account/sessions`, `DELETE /v1/account/sessions/{id}`.
 7. **Rate limiting / DoS protections** (separately approved) — required before any public exposure.
@@ -181,7 +183,7 @@ Each phase: TDD (RED→GREEN), local commits, no push until milestone review.
 1. **Access-token revocation:** confirm **Option 2 (per-request session lookup)** vs stateless-until-expiry.
 2. **Refresh reuse scope:** confirm **session-scoped revocation** vs account-wide on reuse. Also: accept the double-submit self-revoke caveat, or build the rotation-grace window now?
 3. **Dummy-hash-for-nonexistent:** confirm **NO full Argon2 dummy** on 1 vCPU (rate-limit + generic 401 + small jitter instead).
-4. **New secrets:** `Security:JwtSigningKey` (HS256, ≥256-bit) and `Security:RefreshTokenPepper` (HMAC) — confirm names + that they're independent and CSPRNG-generated into user-secrets.
+4. **New secrets (CORRECTED 2026-09-17):** only `Security:JwtSigningKey` (HS256, ≥256-bit), CSPRNG into user-secrets. The refresh token needs **no** secret (SHA-256 verifier) — the `RefreshTokenPepper` once proposed here was removed.
 5. **JWT alg:** confirm **HS256** for now (RS256 only if multi-service verification is needed later).
 6. **`iss`/`aud`:** confirm values (proposed `https://api.bitosx.se` / `bitosx-api`) and 60 s clock skew.
 7. **`0003`:** author the optional `revoked_reason`/index migration now, or defer? (No mandatory schema change either way.)

@@ -2,6 +2,7 @@ using System.Reflection;
 using BitosX.Application.Accounts;
 using BitosX.Application.Sessions;
 using BitosX.Application.Verification;
+using BitosX.Contracts.Accounts;
 
 namespace BitosX.Application.Tests;
 
@@ -30,10 +31,21 @@ public sealed class ZeroKnowledgeModelTests
         "Code", "Otp", "PlaintextCode", "PlaintextOtp", "Secret",
     ];
 
+    // Externally serialized HTTP DTOs that must never carry a secret/verifier/vault field. (TokenResponse
+    // is intentionally a token CARRIER for the legitimate client and is deliberately excluded here.)
+    private static readonly Type[] HttpResponseDtos =
+    [
+        typeof(MeResponse),
+        typeof(SessionResponse),
+    ];
+
     public static IEnumerable<object[]> Models => PersistenceModels.Select(t => new object[] { t });
+
+    public static IEnumerable<object[]> Dtos => HttpResponseDtos.Select(t => new object[] { t });
 
     [Theory]
     [MemberData(nameof(Models))]
+    [MemberData(nameof(Dtos))]
     public void Model_HasNoVaultOrPlaintextSecretFields(Type model)
     {
         foreach (var property in model.GetProperties(BindingFlags.Public | BindingFlags.Instance))
@@ -75,6 +87,30 @@ public sealed class ZeroKnowledgeModelTests
         Assert.DoesNotContain("Code", phone);          // no plaintext OTP
         // Pending phone stays in the challenge until verification succeeds.
         Assert.Contains("PendingPhoneE164", phone);
+    }
+
+    [Fact]
+    public void MeResponse_ExposesOnlyOwnPublicProfile()
+    {
+        var names = PropertyNames(typeof(MeResponse));
+        Assert.Equal(new[] { "AccountId", "Email", "EmailVerified", "CreatedAt" }.OrderBy(n => n),
+            names.OrderBy(n => n));
+        foreach (var forbidden in new[] { "PasswordHash", "Password", "PhoneE164", "DisabledAt", "NormalizedEmail", "UpdatedAt" })
+        {
+            Assert.DoesNotContain(forbidden, names);
+        }
+    }
+
+    [Fact]
+    public void SessionResponse_ExposesNoUserAgentAccountIdOrTokenInternals()
+    {
+        var names = PropertyNames(typeof(SessionResponse));
+        Assert.Equal(new[] { "Id", "CreatedAt", "LastSeenAt", "ExpiresAt", "Current" }.OrderBy(n => n),
+            names.OrderBy(n => n));
+        foreach (var forbidden in new[] { "UserAgent", "AccountId", "TokenHash", "Verifier", "Jti", "ReplacedByTokenId", "RevokedAt", "IpAddress" })
+        {
+            Assert.DoesNotContain(forbidden, names);
+        }
     }
 
     private static string[] PropertyNames(Type type)

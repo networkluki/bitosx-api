@@ -15,9 +15,19 @@ internal sealed class FakeAccountRepository : IAccountRepository
 
     public void Seed(Account a) { _byNormalized[a.NormalizedEmail] = a; _byId[a.Id] = a; }
 
+    public int GetByNormalizedEmailCalls { get; private set; }
+    public string? LastNormalizedEmailQueried { get; private set; }
+    public List<string>? Trace { get; set; }
+
     public Task AddAsync(Account account, CancellationToken ct = default) { Seed(account); return Task.CompletedTask; }
     public Task<Account?> GetByIdAsync(Guid id, CancellationToken ct = default) => Task.FromResult(_byId.GetValueOrDefault(id));
-    public Task<Account?> GetByNormalizedEmailAsync(string n, CancellationToken ct = default) => Task.FromResult(_byNormalized.GetValueOrDefault(n));
+    public Task<Account?> GetByNormalizedEmailAsync(string n, CancellationToken ct = default)
+    {
+        GetByNormalizedEmailCalls++;
+        LastNormalizedEmailQueried = n;
+        Trace?.Add("lookup");
+        return Task.FromResult(_byNormalized.GetValueOrDefault(n));
+    }
 }
 
 internal sealed class FakeRegistrationStore : IAccountRegistrationStore
@@ -57,8 +67,8 @@ internal sealed class FakeVerificationStore : IEmailVerificationStore
 internal sealed class SpyPasswordHasher : IAccountPasswordHasher
 {
     public int HashCalls { get; private set; }
-    public string Hash(string password) { HashCalls++; return "$argon2id$v=19$m=8192,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ"; }
-    public PasswordVerificationResult Verify(string password, string encoded) => PasswordVerificationResult.Success;
+    public Task<string> HashAsync(string password, CancellationToken cancellationToken = default) { HashCalls++; return Task.FromResult("$argon2id$v=19$m=8192,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYQ"); }
+    public Task<PasswordVerificationResult> VerifyAsync(string password, string encoded, CancellationToken cancellationToken = default) => Task.FromResult(PasswordVerificationResult.Success);
 }
 
 internal sealed class FakeTokenFactory : IEmailVerificationTokenFactory

@@ -185,11 +185,123 @@ identifier and does not log headers or bodies.
   generic failures. Timing resistance is **best-effort** (SMTP off the request path;
   no dummy hashing in register) — mandatory rate limiting precedes public exposure.
 
-## Rate limiting (production blocker for account endpoints)
-Per-IP + per-email limits on `/register`, stricter limits + min-interval + daily cap on
-`/resend-verification`, per-IP + backoff on `/verify-email`, a global outbound-email
-budget/circuit-breaker, the Argon2 concurrency cap (present), and adaptive
-Turnstile/CAPTCHA must all be in place before any public exposure.
+## Login, sessions, access + refresh tokens
+
+- **Login is an independent capability** (`AddBitosxLogin`), layered on AccountCore and
+  gated **only** on the current JWT signing key (`Security:JwtSigningKey` + mandatory
+  `Security:Jwt:KeyId`). It requires **neither SMTP nor EmailVerification nor any
+  refresh-token secret**. Non-secret JWT metadata alone never enables it.
+- **Access token:** HS256 JWT with a **mandatory `kid`**, minimal claims (`sub`, `sid`,
+  `jti`, `iat`, `nbf`, `exp`, `iss`, `aud`) — never email/phone/role/vault data. Issued
+  and signed with the **current key only**; validated against **current + previous**
+  (verification-only) during the rotation overlap, via the single
+  `JwtTokenValidationParametersFactory` (HS256 only, exact issuer/audience, explicit clock
+  skew, mandatory-kid resolution with no all-keys fallback). Phase 2B's JwtBearer consumes
+  exactly those parameters — there is never a second validator.
+- **Refresh token:** 256-bit CSPRNG, transmitted as 43-char unpadded Base64URL. The DB
+  stores only the verifier `token_hash = SHA-256(raw 32 token bytes)` (`VARBINARY(32)`) —
+  **no server pepper and no HMAC** (the token is already 256 bits of entropy, so a plain
+  SHA-256 verifier makes offline preimage recovery infeasible). The plaintext token never
+  reaches the store; verifier byte arrays are best-effort zeroed.
+- **Strict rotation / reuse:** rotation is atomic under the canonical lock order
+  (accounts → sessions → refresh_tokens) with authoritative post-lock time. There is
+  **no reuse grace window**: any presentation of an already consumed/revoked token is
+  treated as reuse and revokes the whole session (session-scoped); clients must
+  single-flight refresh requests. Store `Invalid` and `ReuseDetected` both collapse to a
+  single generic failure to callers.
+- **Session lifetimes** (`RefreshTokenOptions`, no secret): idle (default 30 d) and
+  absolute (default 90 d). Both are validated **once at composition (M-2)** to be positive
+  and arithmetically safe for session-expiry math, so a malformed/oversized lifetime fails
+  at startup — never on a user request. Session listing exposes the **effective** expiry
+  `min(absolute, last_seen + idle)` and lists only currently-usable sessions.
+- **Fail-closed config:** `AddBitosxLogin` and `DetectCapabilities` share one validation
+  path, so malformed login config (short/non-canonical key, missing/duplicate `kid`, orphan
+  previous key, blank issuer/audience, non-positive/oversized lifetimes) throws at startup
+  and never registers a half-working login stack. Signing keys are Base64 secrets held only
+  in the secret store; `JwtOptions` carries no secret-revealing `ToString`. `UseAuthentication`
+  / JwtBearer / `/account/me` HTTP wiring is **deferred to Phase 2B**.
+
+## Rate limiting (Phase 2D public-exposure hardening)
+
+Configured under `Security:PublicExposureHardening` (a single validated model, fail-closed at
+startup). **Inert unless `Enabled=true`** (development default false); production with the Login
+capability must enable it before public deployment. Rate limiting is **process-local** for this
+single-instance deployment; a multi-instance deployment needs a separately designed distributed limiter.
+
+**Client-IP trust model (2D.1).** Topology is Cloudflare → Apache → loopback Kestrel. `UseForwardedHeaders`
+processes exactly one hop of `X-Forwarded-For`/`-Proto` and trusts **only** the loopback proxy
+(127.0.0.1, ::1); `KnownProxies`/`KnownIPNetworks` are **not** cleared (framework loopback defaults
+retained). An `X-Forwarded-For` from any non-loopback peer is never honored, and `CF-Connecting-IP` is
+never read in-process. The authoritative client IP is `HttpContext.Connection.RemoteIpAddress` after
+forwarded-header processing (IPv4-mapped IPv6 folded to IPv4). In hardened mode, if no usable non-loopback
+client IP can be resolved for a protected public endpoint, the request **fails closed with 503** — never a
+shared/loopback bucket.
+
+**Implemented (2D.1):** token-bucket limiters (`QueueLimit=0`, no queueing) on the unauthenticated auth
+endpoints — `POST /v1/auth/login` per-IP (10 burst / 5 per 30 s) and per-normalized-email (5 burst / 1 per
+3 min, partitioned by `SHA-256(normalizedEmail)` so the email is never the key or logged; identical for
+existing and unknown accounts, enforced before credential evaluation), and `POST /v1/auth/refresh` per-IP
+(30 burst / 15 per 30 s, partitioned only by the trusted client IP — never by token/hash/contents).
+Rejection is a generic **429** (`title: Too Many Requests`, `detail: Too many requests. Try again later.`,
+plus `Retry-After` when available) that never reveals which limiter fired or any account/email/IP/token
+value; partition keys are never logged. Partition state is memory-bounded (≤4096 IP and ≤4096 email
+partitions, 30-min idle expiration). **`MaxPartitions` is a memory-safety boundary, not a reset lever:**
+a live (non-idle) limiter is **never** evicted to make room, so partition churn (flooding many distinct
+IPs/emails) cannot reset an exhausted limiter. Only entries already past the idle-expiration threshold are
+reclaimable (LRU applies solely among those). When the cache is full and no entry is idle-eligible, a
+**new** partition fails closed with a generic **503** (existing partitions always keep their limiter);
+capacity is never mapped to a `"overflow"`/`"unknown"` bucket, a credential 401, or unrestricted
+execution. Inserts happen only under a lock after a capacity check, so the maximum is never exceeded under
+concurrency. A limiter/IP-resolution failure likewise fails closed (503), never falling through to
+unrestricted auth.
+
+**Implemented (2D.2):**
+
+- **Bounded Argon2 work admission (ALWAYS active — independent of `Enabled`).** Password hashing is a
+  resource-safety chokepoint, so the Argon2 gate is wired in `AddBitosxAccountCore` and applies to every
+  production Argon2 operation (login verify today; future registration / password-change / reset go through
+  the same hasher). Built on a BCL `ConcurrencyLimiter`: at most **2** operations execute, at most **4** wait
+  (**oldest-first / FIFO**), a queued operation waits at most **2 s**, and a further operation is rejected
+  immediately. Queue-full and acquire-timeout both surface as an Application-level
+  `PasswordHashingCapacityExceededException` (never a password mismatch); genuine cancellation propagates and
+  is never rewritten. At the login boundary this maps to a generic **503** (`title: Service unavailable`,
+  `detail: Service temporarily unavailable. Try again later.`, `Retry-After: 1`) — never a credential 401 and
+  never a token; the response discloses nothing about slots/queue/account/credentials. Its configuration
+  (`Security:PublicExposureHardening:Argon2`) is validated fail-closed at startup even when hardening is disabled.
+- **Process-wide login budget (gated by `Enabled`).** One unpartitioned token bucket (30 burst / 15 per 15 s,
+  `QueueLimit=0`), shared across all IPs and accounts, admitted AFTER the per-IP and per-email limiters (so a
+  request already rejected there never consumes a global token) and BEFORE credential evaluation. Rejection is
+  the same generic **429**; an unexpected limiter failure fails closed (503), never unrestricted login.
+- **Bounded login-response jitter (gated by `Enabled`).** A uniform 25–75 ms async delay applied ONLY to the
+  normal credential outcomes (200 / generic 401), after credential evaluation — never to 400/413/429/503 or a
+  canceled request, and never derived from any identity data. Defense-in-depth only; it does not replace
+  constant-time credential handling, Argon2 work, or rate limiting.
+
+The login-path control order is: trusted client-IP → per-IP → 4 KiB body → per-normalized-email →
+process-wide budget → credential/Argon2 admission → jitter → 200/401.
+
+**Implemented (2D.3 — public-exposure gating):**
+
+- **OpenAPI is Development-only.** `AddOpenApi`/`MapOpenApi` are gated behind `IsDevelopment()`; in
+  Production the `/openapi/v1.json` route is absent (normal 404). No production switch is introduced — a
+  future interactive-docs exposure is a separate, explicit decision.
+- **Production posture fails closed at startup** (`ProductionExposureValidation`): in the Production
+  environment, `LoginEnabled` requires `Security:PublicExposureHardening:Enabled = true`, and any
+  repository-controlled Kestrel/`urls` listener must be loopback-only — a wildcard/public
+  (`0.0.0.0`/`[::]`/`*`/`+`/public address) or malformed listener refuses to start. Development/Test are
+  unaffected.
+- **Host filtering** uses the built-in ASP.NET Core mechanism with `AllowedHosts =
+  127.0.0.1;localhost;api.bitosx.se`; `X-Forwarded-Host` is not trusted. TLS/HSTS are terminated upstream
+  (Cloudflare/Apache); Kestrel receives loopback HTTP and adds no `UseHttpsRedirection`/HSTS.
+
+The Cloudflare→Apache→loopback-Kestrel trust boundary and its host-side enforcement (Kestrel loopback
+binding, firewall, Apache real-IP config, secrets injection) are documented, with an app-enforced vs
+deployment-enforced checklist and verification commands, in [`DEPLOYMENT.md`](DEPLOYMENT.md).
+
+**Deferred:** adaptive Turnstile/CAPTCHA (separately approved later). Registration/verification limits
+(`/register`, `/resend-verification`, `/verify-email`) and a global outbound-email budget remain future
+policy — no dead endpoint code is added. Kestrel stays **loopback-only** and the public Apache/Cloudflare
+path must not be configured until the **[host]** items in `DEPLOYMENT.md` are verified.
 
 ## Known incomplete security work (must precede public account/auth go-live)
 

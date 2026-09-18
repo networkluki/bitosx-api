@@ -41,7 +41,7 @@ public sealed class DisabledAccountTests
         // Pre-check finds nothing; finalize rejects.
         Assert.Null(await _ctx.VerificationStore.FindActiveChallengeByVerifierAsync(r.Verifier, now));
         _ctx.Clock.SetUtcNow(now);
-        var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, _ctx.Hasher.Hash("pw-123456789012"));
+        var outcome = await _ctx.VerificationStore.FinalizeVerificationAsync(r.Verifier, await _ctx.Hasher.HashAsync("pw-123456789012"));
         Assert.Equal(VerificationOutcome.InvalidOrExpired, outcome);
 
         // Account unchanged: still no password, not verified, still disabled; challenge not consumed.

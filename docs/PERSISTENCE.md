@@ -119,5 +119,9 @@ The runtime account performs only DML on these tables; the migrator applies `000
 - Phone verification promotes `pending_phone_e164` → `accounts.phone_e164` and
   sets `phone_verified_at` only on success.
 - Login will create a `sessions` row and an initial `refresh_tokens` row; refresh
-  rotates tokens (`consumed_at` + `replaced_by_token_id`) with reuse detection.
+  rotates tokens (`consumed_at` + `replaced_by_token_id`) with **strict reuse detection**
+  (any presentation of a `consumed_at`/`revoked_at` token revokes the whole session and
+  its active tokens; no grace window). The refresh `token_hash` is `SHA-256(raw 32 token
+  bytes)` — no pepper/secret (the token is 256 CSPRNG bits); email/phone `*_hash` HMACs are
+  separate systems and unchanged.
 - Access tokens (15-min JWTs) are stateless and are not stored.

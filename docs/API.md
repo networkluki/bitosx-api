@@ -8,11 +8,16 @@ Error responses use RFC7807 ProblemDetails. Every response carries an
 
 > **Implemented account endpoints:** email-first registration and email
 > ownership verification with account-password creation (`/v1/auth/register`,
-> `/v1/auth/verify-email`, `/v1/auth/resend-verification`). **Login, logout,
-> JWT, refresh tokens, sessions, password reset, phone/SMS, sync, and vault
-> endpoints do not exist yet.** Account endpoints are exposed only when the
-> account subsystem is configured (DB connection + verification pepper + outbox
-> key + SMTP app password); the API otherwise stays health/version only.
+> `/v1/auth/verify-email`, `/v1/auth/resend-verification`), plus **login**
+> (`/v1/auth/login`), **refresh** (`/v1/auth/refresh`), **logout**
+> (`/v1/auth/logout`), **logout-all** (`/v1/auth/logout-all`), and the protected
+> account endpoints **`/v1/account/me`**, **`/v1/account/sessions`**, and
+> **`DELETE /v1/account/sessions/{id}`**. **Password reset, phone/SMS, sync, and
+> vault endpoints do not exist yet.** Registration/verification are exposed when
+> EmailVerification is configured; **login/refresh/logout and the account
+> endpoints are exposed independently when the Login capability is enabled** (DB
+> connection + JWT signing key + kid), even without SMTP. The API otherwise stays
+> health/version only.
 
 ## `POST /v1/auth/register`
 
@@ -53,6 +58,118 @@ account existence/state. Rate limiting is a production blocker (see SECURITY_MOD
 Request: `{ "email": "user@example.com" }` → **202 Accepted** (generic message)
 
 No response ever contains a password, password hash, token, or token verifier.
+
+## `POST /v1/auth/login`
+
+Authenticates an account and starts a session. Mapped only when the **Login**
+capability is enabled. The password is used exactly as supplied; the email is
+case-folded for lookup (surrounding whitespace is invalid). The optional session
+client descriptor is taken from the `User-Agent` header, never the body.
+
+Request: `{ "email": "user@example.com", "password": "<12..128>" }` → **200 OK**
+
+```json
+{
+  "accessToken": "<jwt>",
+  "accessTokenExpiresAt": "2026-01-01T00:15:00Z",
+  "refreshToken": "<base64url, opaque>",
+  "refreshTokenExpiresAt": "2026-01-31T00:00:00Z",
+  "tokenType": "Bearer"
+}
+```
+
+- **Every** credential failure (unknown email, wrong password, unverified,
+  disabled, null password hash, invalid email format) → one identical generic
+  **401** `application/problem+json` (`detail: "Invalid email or password."`) —
+  no account-existence signal. No Argon2 runs for a non-login-capable account.
+- Malformed JSON → **400**. Request body over **4 KiB** → **413** (before any
+  credential evaluation).
+- The access token is a short-lived HS256 JWT (mandatory `kid`); the refresh
+  token is an opaque rotating credential. The response contains no account id,
+  email, session id, password, or token verifier.
+- When public-exposure hardening is enabled: per-IP, per-normalized-email, and a
+  process-wide login budget apply → generic **429** (`Retry-After` when available);
+  an unresolvable trusted client IP → **503**. Bounded Argon2 work admission is
+  **always** active (independent of hardening): if the hash queue is saturated or the
+  bounded wait times out, login returns a generic **503** (`Retry-After: 1`) — never a
+  credential 401 and never a token. See SECURITY_MODEL for the full policy.
+
+## `POST /v1/auth/refresh`
+
+**Unauthenticated** (the access token may already be expired). Exchanges an opaque
+refresh token for a new access JWT + a **rotated** refresh token. Account/session
+identity is resolved from the token by the server; no identity is accepted in the body.
+
+Request: `{ "refreshToken": "<base64url, 43 chars>" }` → **200 OK** (same `TokenResponse`
+shape as login).
+
+- On success the presented token is consumed and replaced; the previous token is
+  never valid again.
+- **Strict reuse (no grace window):** presenting an already-consumed/revoked token
+  revokes the **whole session** (and its remaining tokens); the response is the same
+  generic **401**. Reuse revocation is session-scoped — other sessions of the account stay active.
+- Unknown / malformed / wrong-length / expired / revoked / reused → one identical
+  generic **401** `{ detail: "Invalid or expired refresh token." }` (no token-state
+  disclosure). Malformed JSON → **400**; body over **4 KiB** → **413**.
+- When public-exposure hardening is enabled: a per-IP rate limit applies → generic
+  **429** (`Retry-After` when available); unresolvable trusted client IP → **503**.
+
+## `POST /v1/auth/logout`
+
+**Authenticated** (`Authorization: Bearer <access-jwt>`). Revokes **only the caller's
+current session** (identified from the validated JWT, not the body) and its refresh
+tokens. No request body. → **204 No Content**.
+
+Missing/invalid token, or a token whose session is already revoked/expired → **401**.
+(After logout the same access token no longer authenticates.)
+
+## `POST /v1/auth/logout-all`
+
+**Authenticated.** Revokes **every** session for the account (from the validated JWT
+identity) and all their refresh tokens. No request body. → **204 No Content**. Missing/
+invalid token → **401**.
+
+## `GET /v1/account/me`
+
+**Authenticated.** Returns the caller's own profile, resolved from the validated JWT
+identity. → **200 OK**
+
+```json
+{ "accountId": "<guid>", "email": "user@example.com", "emailVerified": true, "createdAt": "2026-01-01T00:00:00Z" }
+```
+
+No other fields are exposed — no password hash, phone, disabled/updated state,
+normalized email, token, or session internals. Missing/invalid token, or a token whose
+session is revoked/expired → generic **401**.
+
+## `GET /v1/account/sessions`
+
+**Authenticated.** Lists **only the caller's own current-usable sessions** (a management
+view, not history): `revoked_at IS NULL ∧ absolute_expires_at > now ∧ (now − last_seen_at)
+< IdleLifetime` — the same authoritative predicate the session authenticator uses. → **200 OK**
+
+```json
+[ { "id": "<guid>", "createdAt": "…", "lastSeenAt": "…", "expiresAt": "…", "current": true } ]
+```
+
+- `expiresAt` is the **effective** expiry `min(absolute_expires_at, last_seen_at +
+  IdleLifetime)`, computed by the session service (not the endpoint).
+- `current` marks the calling session. Another account's sessions can never appear.
+- No user-agent, account id, refresh-token hash/verifier, chain id, or jti is exposed.
+- Missing/invalid token → **401**.
+
+## `DELETE /v1/account/sessions/{id}`
+
+**Authenticated.** Revokes one of the caller's own sessions (and its refresh tokens).
+Ownership is determined server-side from the validated JWT identity. → **204 No Content**.
+
+- A **nonexistent** session and a session **owned by another account** return the
+  **identical generic 404** (`application/problem+json`) — existence/ownership is never
+  disclosed, and another account's session is never affected.
+- A non-GUID `{id}` does not match the route (→ **404**), so a malformed id never reaches
+  the service. Missing/invalid token → **401**.
+- Deleting the caller's **current** session is allowed (effectively logout); the access
+  token's session is then gone and subsequent authenticated calls return **401**.
 
 ## `GET /health`
 
