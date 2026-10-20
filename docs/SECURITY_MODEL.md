@@ -70,10 +70,46 @@ identifier and does not log headers or bodies.
 - Forwarded headers are trusted from **loopback proxies only** (`127.0.0.1`,
   `::1`) with `ForwardLimit = 1`. Arbitrary-network forwarded headers are never
   trusted.
-- No CORS is configured. The Avalonia desktop client is not a browser and does
-  not need CORS; none will be added without a concrete consumer requirement.
+- CORS exists for exactly one consumer: the browser-based web account app at
+  `https://vault.bitosx.se` (its source lives in `networkluki/bitosx-manager`).
+  See "Browser clients (CORS)" below. The Avalonia desktop client is not a
+  browser and is unaffected.
 - A conservative request-body-size limit (64 KB) is applied at Kestrel; the
   server header is suppressed.
+
+## Browser clients (CORS)
+
+The web account app runs on a different origin (`https://vault.bitosx.se`) than the
+API (`https://api.bitosx.se`), so a browser only lets it read responses when the API
+opts in through CORS. The policy (`BrowserCorsOptions`, configured under
+`Security:Cors`) is deliberately narrow and fails closed at startup:
+
+- **Exact `https://` origins only**, semicolon-separated in `Security:Cors:AllowedOrigins`
+  (the repository `appsettings.json` lists `https://vault.bitosx.se`). No wildcard, no
+  `http://` (not even loopback), no path, trailing slash, query, fragment, userinfo or
+  uppercase: anything but `https://host[:port]` in canonical form refuses startup. A
+  browser's `Origin` header must match byte for byte; `vault.bitosx.se.attacker.example`
+  or a different port gets no CORS headers.
+- **Inert when empty.** With no origin configured the CORS middleware is not registered
+  and no CORS header is ever emitted — the pre-CORS behaviour.
+- **Methods** `GET`, `POST`, `DELETE`; **request headers** `Authorization`,
+  `Content-Type`, `Accept`; **exposed response headers** `Retry-After`,
+  `X-Correlation-ID`; preflight cache `Security:Cors:PreflightMaxAgeSeconds`
+  (default 600, max 86400). None of these lists is configurable: widening them is a
+  code change with a review, not a config edit.
+- **Never credentialed.** `Access-Control-Allow-Credentials` is never sent. The web app
+  authenticates with a bearer access token it attaches itself and holds only in memory;
+  the API sets no cookies, so a cross-site page can neither carry nor read a credential.
+- **Placement.** The middleware runs after forwarded-header processing and the
+  correlation id, and before authentication and the endpoints, so a preflight is answered
+  with `204` without touching a rate limiter, Argon2 or the JWT handler. A disallowed
+  origin is not an error: the request is processed as usual and only the CORS headers
+  are absent, which makes the browser block the read.
+
+CORS is a browser-side read permission, not authentication or authorization. It does not
+change the zero-knowledge boundary, the generic-error model, rate limiting or token
+validation, and it must not be mistaken for a defence against non-browser clients, which
+never honoured it.
 
 ## Public-exposure restrictions
 

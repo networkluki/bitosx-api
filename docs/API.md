@@ -6,6 +6,14 @@ All responses are JSON (`application/json`) with camelCase property names.
 Error responses use RFC7807 ProblemDetails. Every response carries an
 `X-Correlation-ID` header.
 
+**Browser clients (CORS).** Only the origins listed in `Security:Cors:AllowedOrigins`
+(repository default: `https://vault.bitosx.se`, the web account app) may read responses
+from a browser. Allowed methods `GET`/`POST`/`DELETE`, request headers
+`Authorization`/`Content-Type`/`Accept`, exposed headers `Retry-After`/`X-Correlation-ID`,
+no credentials; a preflight (`OPTIONS` + `Access-Control-Request-Method`) is answered with
+**204** before any endpoint runs. Other origins get no CORS headers. See
+[`SECURITY_MODEL.md`](SECURITY_MODEL.md) — "Browser clients (CORS)".
+
 > **Implemented account endpoints:** email-first registration and email
 > ownership verification with account-password creation (`/v1/auth/register`,
 > `/v1/auth/verify-email`, `/v1/auth/resend-verification`), plus **login**

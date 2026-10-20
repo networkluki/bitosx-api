@@ -66,6 +66,17 @@ builder.WebHost.ConfigureKestrel(options =>
     options.AddServerHeader = false;
 });
 
+// ---- CORS for the browser client(s): the web account app at https://vault.bitosx.se ----
+// Bound + validated fail-closed at startup (exact https origins only, no credentials). Inert unless
+// Security:Cors:AllowedOrigins lists at least one origin: then no CORS middleware runs at all and no
+// CORS header is emitted, exactly as before. See BrowserCorsOptions for the policy and its rationale.
+var corsOptions = BrowserCorsOptions.Bind(builder.Configuration);
+builder.Services.AddSingleton(corsOptions);
+if (corsOptions.Enabled)
+{
+    builder.Services.AddCors(options => options.AddPolicy(BrowserCorsOptions.PolicyName, corsOptions.BuildPolicy()));
+}
+
 // ---- Composition root ----
 // Product version is derived from this API assembly's build metadata.
 builder.Services.AddSingleton<IProductVersionProvider>(
@@ -139,6 +150,14 @@ app.UseForwardedHeaders();
 
 // Correlation id + scoped logging (does not log headers or bodies).
 app.UseMiddleware<CorrelationIdMiddleware>();
+
+// CORS runs before authentication so a browser preflight (OPTIONS, no credentials) is answered
+// without ever reaching an endpoint, its rate limiter or the JWT handler. Registered only when an
+// origin is configured; a disallowed Origin simply gets no CORS headers and the browser blocks the read.
+if (corsOptions.Enabled)
+{
+    app.UseCors(BrowserCorsOptions.PolicyName);
+}
 
 // Authentication/authorization run only when the Login capability is enabled (otherwise no
 // authentication scheme is registered and the middleware would have nothing to do).
