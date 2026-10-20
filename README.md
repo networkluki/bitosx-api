@@ -26,10 +26,9 @@ See [`docs/API.md`](docs/API.md) for endpoint details and
 
 ## What is NOT implemented yet
 
-Account registration, login/logout, JWT, refresh tokens, password hashing,
-sessions, email/SMS verification, CAPTCHA, MariaDB/EF, sync, vault upload/
-download, web vault, TOTP, and desktop-client integration. These are later
-milestones.
+Password reset, SMS verification, CAPTCHA, web vault, and TOTP. (Registration with
+email verification, login/refresh/logout, sessions, and encrypted-envelope sync
+exist; see `docs/API.md`.)
 
 ## Requirements
 

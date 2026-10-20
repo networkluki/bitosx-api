@@ -18,6 +18,9 @@ public sealed class AuthRateLimiters : IDisposable
     public BoundedRateLimiterCache LoginPerEmail { get; }
     public BoundedRateLimiterCache RefreshPerIp { get; }
 
+    /// <summary>Envelope writes, partitioned by account id (an authenticated, server-issued identity — never client input).</summary>
+    public BoundedRateLimiterCache SyncWritePerAccount { get; }
+
     /// <summary>One process-wide token bucket shared across all IPs and all accounts/emails (no partition key).</summary>
     public TokenBucketRateLimiter GlobalLoginBudget { get; }
 
@@ -27,6 +30,7 @@ public sealed class AuthRateLimiters : IDisposable
         LoginPerIp = new BoundedRateLimiterCache(options.LoginPerIp, options.PartitionState.MaxIpPartitions, idle, clock);
         RefreshPerIp = new BoundedRateLimiterCache(options.RefreshPerIp, options.PartitionState.MaxIpPartitions, idle, clock);
         LoginPerEmail = new BoundedRateLimiterCache(options.LoginPerEmail, options.PartitionState.MaxEmailPartitions, idle, clock);
+        SyncWritePerAccount = new BoundedRateLimiterCache(options.SyncWritePerAccount, options.PartitionState.MaxEmailPartitions, idle, clock);
         GlobalLoginBudget = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
         {
             TokenLimit = options.GlobalLoginBudget.TokenLimit,
@@ -43,6 +47,7 @@ public sealed class AuthRateLimiters : IDisposable
         LoginPerIp.Dispose();
         RefreshPerIp.Dispose();
         LoginPerEmail.Dispose();
+        SyncWritePerAccount.Dispose();
         GlobalLoginBudget.Dispose();
     }
 }
@@ -106,6 +111,37 @@ public static class AuthRateLimiting
         // Capacity exhaustion (new key, cache full, nothing idle) fails closed with 503 — never a shared
         // bucket and never a reset of an existing live limiter.
         if (!select(limiters).TryAcquire(ipKey, out var lease))
+        {
+            return ServiceUnavailable();
+        }
+
+        using (lease)
+        {
+            return lease.IsAcquired ? await next(context) : TooManyRequests(http, lease);
+        }
+    }
+
+    /// <summary>
+    /// Per-account limit on envelope writes (upload, delete). The partition key is the account id from the
+    /// validated JWT (<c>sub</c>), which the server issued — never anything the client typed. Inert unless
+    /// hardening is enabled, like the other limiters; an unexpected failure fails closed with 503.
+    /// </summary>
+    public static async ValueTask<object?> SyncWritePerAccountFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+    {
+        var http = context.HttpContext;
+        var options = http.RequestServices.GetRequiredService<PublicExposureHardeningOptions>();
+        if (!options.Enabled)
+        {
+            return await next(context);
+        }
+
+        if (!Guid.TryParse(http.User.FindFirst("sub")?.Value, out var accountId) || accountId == Guid.Empty)
+        {
+            return ServiceUnavailable(); // authorization should have refused already; never an unkeyed bucket
+        }
+
+        var limiters = http.RequestServices.GetRequiredService<AuthRateLimiters>();
+        if (!limiters.SyncWritePerAccount.TryAcquire(accountId.ToString("N"), out var lease))
         {
             return ServiceUnavailable();
         }
