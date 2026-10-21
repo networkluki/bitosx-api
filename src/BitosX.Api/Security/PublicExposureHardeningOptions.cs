@@ -19,6 +19,9 @@ public sealed class PublicExposureHardeningOptions
 
     public TokenBucketPolicyOptions RefreshPerIp { get; set; } = new() { TokenLimit = 30, TokensPerPeriod = 15, ReplenishmentSeconds = 30 };
 
+    /// <summary>Envelope uploads and deletes per account (phase 3). Each is a write of up to 16 MiB; a vault changes a few times a day.</summary>
+    public TokenBucketPolicyOptions SyncWritePerAccount { get; set; } = new() { TokenLimit = 30, TokensPerPeriod = 10, ReplenishmentSeconds = 60 };
+
     public PartitionStateOptions PartitionState { get; set; } = new();
 
     /// <summary>Process-wide login admission budget (2D.2). Gated by <see cref="Enabled"/>.</summary>
@@ -33,6 +36,7 @@ public sealed class PublicExposureHardeningOptions
         LoginPerIp.Validate($"{SectionName}:LoginPerIp");
         LoginPerEmail.Validate($"{SectionName}:LoginPerEmail");
         RefreshPerIp.Validate($"{SectionName}:RefreshPerIp");
+        SyncWritePerAccount.Validate($"{SectionName}:SyncWritePerAccount");
         PartitionState.Validate($"{SectionName}:PartitionState");
         GlobalLoginBudget.Validate($"{SectionName}:GlobalLoginBudget");
         LoginJitter.Validate($"{SectionName}:LoginJitter");

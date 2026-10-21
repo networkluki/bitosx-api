@@ -10,6 +10,7 @@ using BitosX.Application.Versioning;
 using BitosX.Infrastructure.Accounts;
 using BitosX.Infrastructure.Persistence;
 using BitosX.Infrastructure.Security;
+using BitosX.Infrastructure.Sync;
 using BitosX.Infrastructure.Versioning;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -123,6 +124,10 @@ if (capabilities.AccountCoreEnabled)
     {
         builder.Services.AddBitosxLogin(builder.Configuration, bitosxConnectionString!);
 
+        // Encrypted-envelope sync rides on Login: every sync endpoint is authenticated by the session JWT.
+        // The server stores the desktop vault file as opaque ciphertext; limits are validated fail-closed.
+        builder.Services.AddBitosxVaultSync(builder.Configuration, bitosxConnectionString!);
+
         // Phase 2D.1: bind + validate public-exposure hardening (fail-closed) and register the auth
         // rate limiters. Inert unless Security:PublicExposureHardening:Enabled is true.
         builder.Services.AddPublicExposureHardening(builder.Configuration);
@@ -159,6 +164,9 @@ if (corsOptions.Enabled)
     app.UseCors(BrowserCorsOptions.PolicyName);
 }
 
+// Per-endpoint request-body limit (the envelope upload needs more than Kestrel's 64 KB default).
+app.UseMiddleware<MaxRequestBodySizeMiddleware>();
+
 // Authentication/authorization run only when the Login capability is enabled (otherwise no
 // authentication scheme is registered and the middleware would have nothing to do).
 if (capabilities.LoginEnabled)
@@ -194,6 +202,7 @@ if (capabilities.LoginEnabled)
 {
     app.MapLoginEndpoints();
     app.MapAccountEndpoints();
+    app.MapSyncEndpoints();
 }
 
 // Capability state is logged safely at startup (booleans only, no secrets) and is

@@ -3,6 +3,7 @@ using BitosX.Application.Accounts;
 using BitosX.Application.Sessions;
 using BitosX.Application.Verification;
 using BitosX.Contracts.Accounts;
+using BitosX.Contracts.Sync;
 
 namespace BitosX.Application.Tests;
 
@@ -37,6 +38,10 @@ public sealed class ZeroKnowledgeModelTests
     [
         typeof(MeResponse),
         typeof(SessionResponse),
+        typeof(SyncStatusResponse),
+        typeof(SyncUploadResponse),
+        typeof(SyncUploadRequest),
+        typeof(SyncEnvelopeResponse),
     ];
 
     public static IEnumerable<object[]> Models => PersistenceModels.Select(t => new object[] { t });
@@ -111,6 +116,32 @@ public sealed class ZeroKnowledgeModelTests
         {
             Assert.DoesNotContain(forbidden, names);
         }
+    }
+
+    // The sync contracts carry the encrypted envelope and public metadata about it — nothing that could
+    // decrypt it. If a field that could (a key, a password, plaintext) is ever added, this fails.
+    [Theory]
+    [InlineData(typeof(SyncStatusResponse), new[] { "Revision", "Fingerprint", "SizeBytes", "UpdatedAt" })]
+    [InlineData(typeof(SyncUploadResponse), new[] { "Revision", "Fingerprint", "SizeBytes", "UpdatedAt" })]
+    [InlineData(typeof(SyncUploadRequest), new[] { "BaseRevision", "Envelope" })]
+    [InlineData(typeof(SyncEnvelopeResponse), new[] { "Revision", "Fingerprint", "SizeBytes", "UpdatedAt", "Envelope" })]
+    public void SyncContracts_ExposeOnlyTheEnvelopeAndPublicMetadata(Type contract, string[] expected)
+    {
+        var names = PropertyNames(contract);
+        Assert.Equal(expected.OrderBy(n => n), names.OrderBy(n => n));
+        foreach (var forbidden in new[] { "Key", "Password", "Plaintext", "Items", "Login", "Salt", "Nonce" })
+        {
+            Assert.DoesNotContain(names, n => n.Contains(forbidden, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    [Fact]
+    public void StoredEnvelope_CarriesOnlyCiphertextAndPublicMetadata()
+    {
+        var names = PropertyNames(typeof(BitosX.Application.Abstractions.Persistence.StoredEnvelope));
+        Assert.Equal(
+            new[] { "AccountId", "Revision", "Fingerprint", "SizeBytes", "CreatedAt", "UpdatedAt", "Envelope" }.OrderBy(n => n),
+            names.OrderBy(n => n));
     }
 
     private static string[] PropertyNames(Type type)

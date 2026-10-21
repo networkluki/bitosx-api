@@ -70,7 +70,7 @@ public sealed class LoginApiFactory : WebApplicationFactory<Program>
         await c.OpenAsync();
         await using var cmd = c.CreateCommand();
         // Children first (FKs): refresh_tokens -> sessions -> accounts; outbox references accounts.
-        cmd.CommandText = "DELETE FROM refresh_tokens; DELETE FROM sessions; DELETE FROM email_outbox; DELETE FROM accounts;";
+        cmd.CommandText = "DELETE FROM refresh_tokens; DELETE FROM sessions; DELETE FROM email_outbox; DELETE FROM vault_blobs; DELETE FROM accounts;";
         await cmd.ExecuteNonQueryAsync();
     }
 

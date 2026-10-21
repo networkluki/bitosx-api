@@ -20,8 +20,8 @@ no credentials; a preflight (`OPTIONS` + `Access-Control-Request-Method`) is ans
 > (`/v1/auth/login`), **refresh** (`/v1/auth/refresh`), **logout**
 > (`/v1/auth/logout`), **logout-all** (`/v1/auth/logout-all`), and the protected
 > account endpoints **`/v1/account/me`**, **`/v1/account/sessions`**, and
-> **`DELETE /v1/account/sessions/{id}`**. **Password reset, phone/SMS, sync, and
-> vault endpoints do not exist yet.** Registration/verification are exposed when
+> **`DELETE /v1/account/sessions/{id}`**. **Encrypted-envelope sync** (`/v1/sync/*`) rides on Login. **Password reset
+> and phone/SMS do not exist yet.** Registration/verification are exposed when
 > EmailVerification is configured; **login/refresh/logout and the account
 > endpoints are exposed independently when the Login capability is enabled** (DB
 > connection + JWT signing key + kid), even without SMTP. The API otherwise stays
@@ -178,6 +178,50 @@ Ownership is determined server-side from the validated JWT identity. → **204 N
   the service. Missing/invalid token → **401**.
 - Deleting the caller's **current** session is allowed (effectively logout); the access
   token's session is then gone and subsequent authenticated calls return **401**.
+
+## Encrypted-envelope sync (`/v1/sync`)
+
+**Authenticated**, mapped with the Login capability. The *envelope* is the desktop vault file
+exactly as BitosX writes it: JSON whose cryptographic fields are ciphertext under a key derived
+from the master password on the device. The server stores and returns those bytes and never has
+anything that could decrypt them; the only thing it reads is the public header (a JSON object with
+a numeric `version`), to refuse arbitrary bytes. One envelope per account.
+
+Every stored envelope has a **revision** (1, 2, 3, …) and a **fingerprint** (SHA-256 over the
+bytes, lowercase hex). Uploads are compare-and-set on the revision, so two devices can never
+overwrite each other unknowingly: the client names the revision it last saw, and the server writes
+only if that is still current.
+
+### `GET /v1/sync/status`
+
+→ **200** `{ "revision": 3, "fingerprint": "<64 hex>", "sizeBytes": 12345, "updatedAt": "…" }`,
+or **404** when nothing is stored.
+
+### `GET /v1/sync/envelope`
+
+→ **200** `{ "revision", "fingerprint", "sizeBytes", "updatedAt", "envelope": "<base64>" }`
+(`Cache-Control: no-store`), or **404** when nothing is stored.
+
+### `PUT /v1/sync/envelope`
+
+Request: `{ "baseRevision": 0, "envelope": "<base64>" }` — `baseRevision` is the revision the
+client last saw, `0` when it has never uploaded.
+
+- **200** `{ "revision", "fingerprint", "sizeBytes", "updatedAt" }` — stored as `baseRevision + 1`.
+- **409** `application/problem+json` with `currentRevision` — the server holds a revision the
+  client has not seen; nothing was written. Download it first, or upload against it deliberately.
+- **400** — not Base64, empty, or not a BitosX envelope (not UTF-8 JSON, not an object, no
+  positive integer `version`, or trailing content).
+- **413** — the decoded envelope exceeds `Security:Sync:MaxEnvelopeBytes` (default and maximum
+  16 MiB, the desktop format's own cap); the request body limit for this endpoint is raised
+  accordingly (Base64 of that plus 1 KiB).
+- Under public-exposure hardening a per-account write limit applies (30 burst / 10 per minute,
+  keyed by the account id from the JWT) → generic **429**.
+
+### `DELETE /v1/sync/envelope`
+
+Removes the account's stored envelope. → **204**, also when nothing was stored (idempotent). Under
+hardening the same per-account write limit applies.
 
 ## `GET /health`
 
