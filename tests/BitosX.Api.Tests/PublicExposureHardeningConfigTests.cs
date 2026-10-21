@@ -40,6 +40,19 @@ public sealed class PublicExposureHardeningConfigTests
         Assert.NotNull(sp.GetRequiredService<AuthRateLimiters>());
     }
 
+    [Fact] public void SyncWrite_Defaults_AreValid()
+    {
+        var services = new ServiceCollection();
+        services.AddPublicExposureHardening(Cfg(new Dictionary<string, string?>()));
+        var o = services.BuildServiceProvider().GetRequiredService<PublicExposureHardeningOptions>();
+        Assert.Equal(30, o.SyncWritePerAccount.TokenLimit);
+        Assert.Equal(10, o.SyncWritePerAccount.TokensPerPeriod);
+        Assert.Equal(60, o.SyncWritePerAccount.ReplenishmentSeconds);
+    }
+
+    [Fact] public void SyncWrite_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "SyncWritePerAccount:TokenLimit"] = "0" }));
+    [Fact] public void SyncWrite_TokensPerPeriodExceedsLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "SyncWritePerAccount:TokensPerPeriod"] = "999" }));
+
     [Fact] public void ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "LoginPerIp:TokenLimit"] = "0" }));
     [Fact] public void NegativeReplenishment_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "LoginPerIp:ReplenishmentSeconds"] = "-1" }));
     [Fact] public void TokensPerPeriodExceedsLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "LoginPerEmail:TokensPerPeriod"] = "999" }));

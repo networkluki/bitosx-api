@@ -23,8 +23,12 @@ plaintext or vault cryptographic keys.
 
 Consequently, no DTO, endpoint parameter, database field, log field, or
 telemetry field may be introduced that could accept vault cryptographic
-secrets. The current `Contracts` DTOs (`HealthResponse`, `VersionResponse`)
-carry only non-sensitive service identity/version data.
+secrets. The one place vault *ciphertext* crosses the boundary is the encrypted
+envelope of phase 3 (`SyncUploadRequest.Envelope`, `vault_blobs.envelope`): the
+desktop vault file, opaque to the server, stored and returned byte for byte —
+see "Encrypted-envelope sync" below. It carries no key and no plaintext, and
+`ZeroKnowledgeModelTests` keeps every other contract and model free of
+vault-named fields.
 
 ## Account authentication is separate from vault encryption
 
@@ -220,6 +224,38 @@ identifier and does not log headers or bodies.
   and never registers a half-working login stack. Signing keys are Base64 secrets held only
   in the secret store; `JwtOptions` carries no secret-revealing `ToString`. `UseAuthentication`
   / JwtBearer / `/account/me` HTTP wiring is **deferred to Phase 2B**.
+
+## Encrypted-envelope sync (phase 3)
+
+The desktop app can store its vault file on the server and fetch it back (`/v1/sync`). This is
+the first server feature that touches the vault at all, so the boundary is stated precisely:
+
+- **What is stored:** the vault file as the client wrote it — a JSON envelope whose salt, nonces,
+  wrapped key and content are ciphertext under a key derived from the master password *on the
+  device* (`bitosx/docs/CRYPTOGRAPHY.md`). The server has no master password, no key-encryption
+  key, no vault key, and no way to obtain one. A full compromise of the server yields the same
+  thing a stolen vault file yields: an offline guessing problem against the master password,
+  made expensive by Argon2id on the client's terms.
+- **What the server reads of it:** the public header only — enough to confirm it is a JSON
+  object with a positive integer `version` (`VaultSyncService.LooksLikeEnvelope`). The
+  cryptographic fields are never decoded. The fingerprint (SHA-256 over the bytes) is computed
+  server-side and is public: it lets a client tell whether its file matches without a download.
+- **No merge.** The server never combines two envelopes (it could not: they are ciphertext). An
+  upload names the revision the client last saw; if the server holds another, the upload is
+  refused with 409 and the client decides. Two devices can therefore never silently overwrite
+  each other.
+- **Limits.** Envelope ≤ 16 MiB decoded (`Security:Sync:MaxEnvelopeBytes`, validated at startup,
+  never above the desktop format's own cap); the upload endpoint's body limit is raised to the
+  Base64 of that plus 1 KiB, every other endpoint keeps Kestrel's 64 KB. Under hardening, writes
+  are limited per account (30 burst / 10 per minute, keyed by the JWT `sub` — a server-issued
+  identity, never client input).
+- **Account deletion** cascades to the envelope (FK `ON DELETE CASCADE`); an upload for an account
+  deleted meanwhile is refused (the account row is locked first) and nothing is written.
+- **Logging:** no envelope bytes, fingerprints or sizes are logged; the correlation id and the
+  outcome are all a log line carries.
+- **Database host note:** a 16 MiB row needs MariaDB's `max_allowed_packet` at 32M or more on
+  the host (see `DEPLOYMENT.md`); below that an upload fails as a server error, never as a
+  partial write.
 
 ## Rate limiting (Phase 2D public-exposure hardening)
 

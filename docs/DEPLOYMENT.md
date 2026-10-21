@@ -70,6 +70,9 @@ These are **not** verifiable from this repository. Each is a blocker until confi
   Kestrel does **not** terminate public TLS or add `UseHttpsRedirection`/HSTS (that would risk proxy
   redirect loops); HSTS is an Apache/Cloudflare responsibility. `X-Forwarded-Proto` is processed before
   any scheme-dependent component.
+- **[host] MariaDB `max_allowed_packet`** — at least `32M` (`/etc/mysql/mariadb.conf.d/*.cnf`, `[mysqld]`
+  section), so a 16 MiB encrypted envelope (`/v1/sync/envelope`) can be written in one statement. Below
+  that an upload fails as a server error; nothing is partially written.
 - **[host] Secrets supplied outside source control** — JWT signing key(s), DB credentials, SMTP/outbox
   keys provided via a secret store / environment, never committed.
 

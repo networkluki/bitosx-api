@@ -95,6 +95,20 @@ password. See [`SECURITY_MODEL.md`](SECURITY_MODEL.md).
 `accounts` is unchanged: `password_hash VARCHAR(255)` is set (from NULL) at verification.
 The runtime account performs only DML on these tables; the migrator applies `0002`.
 
+## Migration 0003 (encrypted-envelope sync)
+
+`0003_vault_sync.sql` adds `vault_blobs`: one row per account — `account_id` PK (FK → accounts,
+`ON DELETE CASCADE`), `revision BIGINT` (compare-and-set, starts at 1), `size_bytes`,
+`fingerprint VARBINARY(32)` (SHA-256 of the envelope bytes, public), `envelope MEDIUMBLOB` (the
+desktop vault file as uploaded: ciphertext the server cannot read), `created_at`, `updated_at`.
+
+The zero-knowledge exclusions above are unchanged: the envelope is ciphertext under a key the server
+never has, and no column holds a master password, a vault key, or plaintext. An upload locks the
+account row, then the envelope row, and writes only if the client's base revision is still current.
+
+**Host requirement:** a 16 MiB envelope needs `max_allowed_packet >= 32M` on the MariaDB server
+(the default 16M is not enough for the largest allowed row plus protocol overhead).
+
 ## Migration procedure
 
 1. Author the next script as `NNNN_description.sql` under
