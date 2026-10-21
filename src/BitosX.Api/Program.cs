@@ -68,8 +68,8 @@ builder.WebHost.ConfigureKestrel(options =>
 });
 
 // ---- CORS for the browser client(s): the web account app at https://vault.bitosx.se ----
-// Bound + validated fail-closed at startup (exact https origins only, no credentials). Inert unless
-// Security:Cors:AllowedOrigins lists at least one origin: then no CORS middleware runs at all and no
+// Bound + validated fail-closed at startup (exact https origins only, no credentials).
+// With an empty Security:Cors:AllowedOrigins list, no CORS middleware is registered and no
 // CORS header is emitted, exactly as before. See BrowserCorsOptions for the policy and its rationale.
 var corsOptions = BrowserCorsOptions.Bind(builder.Configuration);
 builder.Services.AddSingleton(corsOptions);
