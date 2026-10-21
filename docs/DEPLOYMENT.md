@@ -45,6 +45,9 @@ Status legend:
   (loopback-only). This is the authoritative production listener; the app validates it in Production.
 - **[repo] Host filtering** — `appsettings.json` → `AllowedHosts = 127.0.0.1;localhost;api.bitosx.se`
   (ASP.NET Core Host Filtering is enabled by default and consumes this). `X-Forwarded-Host` is not trusted.
+- **[repo] CORS allowlist** — `appsettings.json` → `Security:Cors:AllowedOrigins = https://vault.bitosx.se`
+  (exact https origin, validated fail-closed; empty disables CORS). Methods/headers are fixed in code and
+  credentials are never allowed. See SECURITY_MODEL — "Browser clients (CORS)".
 - **[repo] No committed secrets** — `appsettings*.json` and templates contain no JWT signing key, DB
   credentials, refresh tokens, passwords, Cloudflare tokens, origin private keys, or SMTP credentials;
   secrets come from user-secrets / production injection only.
@@ -70,6 +73,11 @@ These are **not** verifiable from this repository. Each is a blocker until confi
   Kestrel does **not** terminate public TLS or add `UseHttpsRedirection`/HSTS (that would risk proxy
   redirect loops); HSTS is an Apache/Cloudflare responsibility. `X-Forwarded-Proto` is processed before
   any scheme-dependent component.
+- **[host] Apache passes CORS through untouched** — the vhost must forward `OPTIONS` requests and the
+  `Origin` / `Access-Control-Request-*` headers to Kestrel and must **not** add its own
+  `Access-Control-*` headers (`Header set/add Access-Control-...`): a duplicated or conflicting header makes
+  the browser reject the response, and a permissive one at the proxy would widen the policy the
+  application enforces.
 - **[host] MariaDB `max_allowed_packet`** — at least `32M` (`/etc/mysql/mariadb.conf.d/*.cnf`, `[mysqld]`
   section), so a 16 MiB encrypted envelope (`/v1/sync/envelope`) can be written in one statement. Below
   that an upload fails as a server error; nothing is partially written.
@@ -105,6 +113,15 @@ curl -si https://api.bitosx.se/openapi/v1.json | head -n 1
 
 # Health is reachable through the proxy chain (expect 200):
 curl -si https://api.bitosx.se/health | head -n 1
+
+# CORS: a preflight from the web account app is answered (expect 204 and
+# Access-Control-Allow-Origin: https://vault.bitosx.se, no Allow-Credentials):
+curl -si -X OPTIONS https://api.bitosx.se/v1/auth/login \
+  -H 'Origin: https://vault.bitosx.se' -H 'Access-Control-Request-Method: POST' \
+  -H 'Access-Control-Request-Headers: content-type,authorization' | grep -i -E '^HTTP|access-control'
+
+# CORS: any other origin gets no Access-Control-* headers at all (expect none):
+curl -si https://api.bitosx.se/health -H 'Origin: https://attacker.example' | grep -i access-control
 ```
 
 Do not mark any **[host]** item as done based on this document alone — confirm each against the running host.
