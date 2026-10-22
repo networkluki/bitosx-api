@@ -25,11 +25,17 @@ public sealed class LoginServiceTests
         public required FakeRefreshTokenFactory Refresh { get; init; }
         public required FakeSessionStore Store { get; init; }
         public required FakeAccessTokenService Access { get; init; }
+        public required FakeTotpStore Totp { get; init; }
+        public required FakeMfaChallengeStore Mfa { get; init; }
         public required List<string> Trace { get; init; }
     }
 
-    private static Harness Build(bool seedAccount = true, bool verified = true, string? passwordHash = Phc, DateTime? disabledAt = null)
+    internal static BitosX.Application.Mfa.SecondFactorAvailability Capabilities(bool totp = true) => new(totp);
+
+    private static Harness Build(bool seedAccount = true, bool verified = true, string? passwordHash = Phc, DateTime? disabledAt = null, bool totpCapability = true)
     {
+        var totp = new FakeTotpStore();
+        var mfa = new FakeMfaChallengeStore();
         var trace = new List<string>();
         var accounts = new FakeAccountRepository { Trace = trace };
         var hasher = new ConfigurablePasswordHasher { Trace = trace };
@@ -66,8 +72,9 @@ public sealed class LoginServiceTests
 
         return new Harness
         {
-            Service = new LoginService(accounts, hasher, refresh, store, access),
-            Accounts = accounts, Hasher = hasher, Refresh = refresh, Store = store, Access = access, Trace = trace,
+            Service = new LoginService(accounts, hasher, refresh, store, access, totp, mfa, new BitosX.Application.Mfa.TotpOptions(), Capabilities(totpCapability),
+                new Microsoft.Extensions.Time.Testing.FakeTimeProvider(new DateTimeOffset(SessionCreatedAt))),
+            Accounts = accounts, Hasher = hasher, Refresh = refresh, Store = store, Access = access, Totp = totp, Mfa = mfa, Trace = trace,
         };
     }
 
@@ -326,5 +333,70 @@ public sealed class LoginServiceTests
         Assert.DoesNotContain("super-secret-pw", s, StringComparison.Ordinal);
         Assert.DoesNotContain("secret.person@example.com", s, StringComparison.Ordinal); // INFO-1: email redacted too
         Assert.Contains("<redacted>", s, StringComparison.Ordinal);
+    }
+
+    // ---- second factor ----
+
+    private static BitosX.Application.Abstractions.Persistence.TotpEnrollment Confirmed(Guid accountId)
+        => new(accountId, new BitosX.Application.Mfa.ProtectedTotpSecret(1, new byte[12], new byte[20], new byte[16]), SessionCreatedAt.AddDays(-1), SessionCreatedAt.AddDays(-1), null);
+
+    [Fact]
+    public async Task TotpConfirmed_ReturnsMfaRequired_WithChallenge_NoSessionNoTokens()
+    {
+        var h = Build();
+        h.Totp.Enrollment = Confirmed(AccountId);
+
+        var r = await h.Service.LoginAsync(Cmd(ua: "Agent/1"));
+
+        Assert.Equal(LoginOutcome.MfaRequired, r.Outcome);
+        Assert.False(string.IsNullOrEmpty(r.MfaToken));
+        Assert.Equal(SessionCreatedAt.AddMinutes(5), r.MfaTokenExpiresAt);
+        Assert.Null(r.AccessToken);
+        Assert.Null(r.RefreshToken);
+        Assert.Equal(0, h.Store.CreateCalls);
+        Assert.Equal(0, h.Access.IssueCalls);
+        Assert.Equal(1, h.Mfa.CreateCalls);
+        Assert.Equal(AccountId, h.Mfa.Created!.AccountId);
+        Assert.Equal("Agent/1", h.Mfa.Created.UserAgent);
+        Assert.Equal(LoginService.PasswordHashFingerprint(Phc), h.Mfa.Created.PasswordHashFingerprint);
+        Assert.DoesNotContain(r.MfaToken, r.ToString());
+    }
+
+    [Fact]
+    public async Task TotpConfirmed_WrongPassword_IsInvalidCredentials_NoChallenge()
+    {
+        var h = Build();
+        h.Totp.Enrollment = Confirmed(AccountId);
+        h.Hasher.VerifyResult = PasswordVerificationResult.Failed;
+
+        var r = await h.Service.LoginAsync(Cmd());
+
+        Assert.Equal(LoginOutcome.InvalidCredentials, r.Outcome);
+        Assert.Equal(0, h.Mfa.CreateCalls);
+    }
+
+    [Fact]
+    public async Task TotpConfirmed_CapabilityOff_FailsClosed_NoSession()
+    {
+        var h = Build(totpCapability: false);
+        h.Totp.Enrollment = Confirmed(AccountId);
+
+        var r = await h.Service.LoginAsync(Cmd());
+
+        Assert.Equal(LoginOutcome.MfaUnavailable, r.Outcome);
+        Assert.Equal(0, h.Store.CreateCalls);
+        Assert.Equal(0, h.Mfa.CreateCalls);
+    }
+
+    [Fact]
+    public async Task TotpPendingOnly_IsNotASecondFactor_LoginSucceeds()
+    {
+        var h = Build();
+        h.Totp.Enrollment = Confirmed(AccountId) with { ConfirmedAt = null };
+
+        var r = await h.Service.LoginAsync(Cmd());
+
+        Assert.Equal(LoginOutcome.Succeeded, r.Outcome);
+        Assert.Equal(0, h.Mfa.CreateCalls);
     }
 }

@@ -133,6 +133,13 @@ if (capabilities.AccountCoreEnabled)
         // The server stores the desktop vault file as opaque ciphertext; limits are validated fail-closed.
         builder.Services.AddBitosxVaultSync(builder.Configuration, bitosxConnectionString!);
 
+        // Second factor (TOTP) rides on Login and is enabled only by Security:TotpKey. Without it the TOTP
+        // routes answer 503 and an account that already has TOTP confirmed is refused at login (fail closed).
+        if (capabilities.TotpEnabled)
+        {
+            builder.Services.AddBitosxTotp(builder.Configuration);
+        }
+
         builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
         builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
             .Configure<JwtTokenValidationParametersFactory>((options, factory) =>
@@ -209,8 +216,8 @@ if (capabilities.LoginEnabled)
 // Capability state is logged safely at startup (booleans only, no secrets) and is
 // deliberately NOT exposed on the public /health endpoint.
 app.Logger.LogInformation(
-    "BitosX account capabilities: AccountCore={AccountCore} EmailVerification={EmailVerification} EmailDelivery={EmailDelivery} Login={Login}",
-    capabilities.AccountCoreEnabled, capabilities.EmailVerificationEnabled, capabilities.EmailDeliveryEnabled, capabilities.LoginEnabled);
+    "BitosX account capabilities: AccountCore={AccountCore} EmailVerification={EmailVerification} EmailDelivery={EmailDelivery} Login={Login} Totp={Totp}",
+    capabilities.AccountCoreEnabled, capabilities.EmailVerificationEnabled, capabilities.EmailDeliveryEnabled, capabilities.LoginEnabled, capabilities.TotpEnabled);
 
 // Extensibility seam for endpoint contributions registered in DI. No modules
 // are registered in production; integration tests use this to exercise the

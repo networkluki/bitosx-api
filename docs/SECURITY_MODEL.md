@@ -331,6 +331,46 @@ the first server feature that touches the vault at all, so the boundary is state
   AccountCore (not Login) because these limiters ride on EmailVerification alone. Argon2 admission
   applies as always.
 
+## Second factor: TOTP (phase 7)
+
+- **Capability `Totp`** = Login + `Security:TotpKey` (Base64, 256-bit; secret store only). The key
+  never touches the DB or logs. Two sub-keys are derived with HKDF-SHA256 (distinct labels): one
+  encrypts stored TOTP secrets (AES-256-GCM, fresh 96-bit nonce, AAD = account id + envelope
+  version, so a row cannot be transplanted to another account), one keys the HMAC-SHA256
+  verifiers of recovery codes (a leaked table cannot be brute-forced offline). A malformed key fails
+  startup; a key without Login fails startup.
+- **Fail closed, never bypass.** The TOTP *persistence* is registered with Login (DB only), so
+  `LoginService` always sees whether an account has TOTP confirmed. If it has and the crypto
+  capability is off, login returns a generic 503 — never a password-only session. Tested end to end
+  (enroll with the key, boot without it).
+- **Two steps, one session.** A correct password for a TOTP account creates **no** session and no
+  JWT/refresh token: it stores an `mfa_challenges` row — SHA-256 verifier of a 256-bit opaque token
+  (same scheme as refresh tokens), the SHA-256 fingerprint of the PHC that was just verified, the
+  User-Agent — and returns 202 with the token (5-minute TTL). The second step strictly parses the
+  token, re-reads the account, requires the **same PHC fingerprint** (a password reset between the
+  steps kills the challenge), requires TOTP still confirmed, verifies and consumes the code, consumes
+  the challenge (conditional UPDATE, single use), and only then runs the same `CreateOnLoginAsync`
+  as a password-only login (exact-PHC re-check under the account lock). No Argon2 in step two.
+- **Codes.** RFC 6238 HMAC-SHA1 / 6 digits / 30 s (verified against the RFC's own test vectors),
+  window ±1 step, constant-time comparison per candidate with every candidate evaluated. **Replay
+  guard in the store:** `last_used_step` is advanced by a conditional UPDATE (`last_used_step <
+  step`), so a code is accepted once and never for an older step, even under concurrent
+  presentations. Recovery codes: 10 characters from a look-alike-free alphabet (~49 bits), stored as
+  keyed verifiers, consumed by conditional UPDATE (single use, account-bound). A wrong code
+  increments the challenge's attempt count; at 5 the challenge is consumed. The second-step
+  response is one generic 401 for every failure; no attempts-left hint.
+- **Enrollment** is password-confirmed (Argon2 outside any lock, through the admission gate); the
+  secret is generated server-side (160 bits), returned once as Base32 + otpauth URI, stored
+  encrypted with `confirmed_at NULL`. A pending secret is not a factor; it is replaced by the next
+  enroll and becomes the factor only when a valid code confirms it, which also issues the recovery
+  codes (returned once). Disable and recovery-code regeneration require password **then** code (a
+  wrong password never consumes a code). Disabling deletes the secret, the codes and open challenges.
+- **Rate limits** (hardened mode): second step per trusted client IP (10 burst / 5 per 30 s),
+  TOTP management per account id (10 burst / 2 per 60 s). Same generic 429/503 contract.
+- **Scope.** The second factor protects the account sign-in only. It cannot protect, recover or
+  weaken the vault: the master password and the envelope are untouched (zero-knowledge boundary).
+  Account deletion cascades the TOTP rows; a password reset keeps TOTP enabled.
+
 ## Rate limiting (Phase 2D public-exposure hardening)
 
 Configured under `Security:PublicExposureHardening` (a single validated model, fail-closed at
@@ -407,6 +447,9 @@ process-wide budget → credential/Argon2 admission → jitter → 200/401.
 The Cloudflare→Apache→loopback-Kestrel trust boundary and its host-side enforcement (Kestrel loopback
 binding, firewall, Apache real-IP config, secrets injection) are documented, with an app-enforced vs
 deployment-enforced checklist and verification commands, in [`DEPLOYMENT.md`](DEPLOYMENT.md).
+
+**Implemented (phase 7):** `POST /v1/auth/login/totp` per-IP, `/v1/account/totp/*` per-account — see
+"Second factor: TOTP".
 
 **Implemented (phase 6):** `POST /v1/auth/forgot-password` per-IP + per-normalized-email,
 `POST /v1/auth/reset-password` per-IP (shared bucket), `POST /v1/account/delete` per-account — see

@@ -18,6 +18,12 @@ public enum LoginOutcome
 {
     Succeeded,
     InvalidCredentials,
+
+    /// <summary>Password accepted; the account has TOTP, so a second step with <see cref="LoginResult.MfaToken"/> is required.</summary>
+    MfaRequired,
+
+    /// <summary>Password accepted and TOTP is required, but the server cannot verify codes (Totp capability off). Fail closed.</summary>
+    MfaUnavailable,
 }
 
 /// <summary>
@@ -33,7 +39,16 @@ public sealed record LoginResult
     public string? RefreshToken { get; init; }
     public DateTime RefreshTokenExpiresAt { get; init; }
 
+    /// <summary>Opaque second-step token (43-char Base64URL), set only for <see cref="LoginOutcome.MfaRequired"/>.</summary>
+    public string? MfaToken { get; init; }
+    public DateTime MfaTokenExpiresAt { get; init; }
+
     public static LoginResult InvalidCredentials { get; } = new() { Outcome = LoginOutcome.InvalidCredentials };
+
+    public static LoginResult MfaUnavailable { get; } = new() { Outcome = LoginOutcome.MfaUnavailable };
+
+    public static LoginResult MfaRequired(string mfaToken, DateTime expiresAt)
+        => new() { Outcome = LoginOutcome.MfaRequired, MfaToken = mfaToken, MfaTokenExpiresAt = expiresAt };
 
     public static LoginResult Succeeded(string accessToken, DateTime accessTokenExpiresAt, string refreshToken, DateTime refreshTokenExpiresAt)
         => new()
@@ -46,7 +61,7 @@ public sealed record LoginResult
         };
 
     public override string ToString()
-        => $"LoginResult {{ Outcome = {Outcome}, AccessToken = <redacted>, AccessTokenExpiresAt = {AccessTokenExpiresAt:O}, RefreshToken = <redacted>, RefreshTokenExpiresAt = {RefreshTokenExpiresAt:O} }}";
+        => $"LoginResult {{ Outcome = {Outcome}, AccessToken = <redacted>, AccessTokenExpiresAt = {AccessTokenExpiresAt:O}, RefreshToken = <redacted>, RefreshTokenExpiresAt = {RefreshTokenExpiresAt:O}, MfaToken = <redacted> }}";
 }
 
 /// <summary>

@@ -22,8 +22,9 @@ no credentials; a preflight (`OPTIONS` + `Access-Control-Request-Method`) is ans
 > account endpoints **`/v1/account/me`**, **`/v1/account/sessions`**, and
 > **`DELETE /v1/account/sessions/{id}`**. **Encrypted-envelope sync** (`/v1/sync/*`) rides on Login.
 > **Password reset by emailed link** (`/v1/auth/forgot-password`, `/v1/auth/reset-password`) and
-> **password-confirmed account deletion** (`POST /v1/account/delete`) exist since phase 6.
-> **Phone/SMS does not exist yet.** Registration/verification/password reset are exposed when
+> **password-confirmed account deletion** (`POST /v1/account/delete`) exist since phase 6. **TOTP
+> two-factor sign-in** (`POST /v1/auth/login/totp`, `/v1/account/totp/*`) exists since phase 7 and is
+> exposed when the **Totp** capability is enabled (`Security:TotpKey`). **Phone/SMS does not exist yet.** Registration/verification/password reset are exposed when
 > EmailVerification is configured; **login/refresh/logout and the account
 > endpoints are exposed independently when the Login capability is enabled** (DB
 > connection + JWT signing key + kid), even without SMTP. The API otherwise stays
@@ -135,12 +136,35 @@ Request: `{ "email": "user@example.com", "password": "<12..128>" }` → **200 OK
 - The access token is a short-lived HS256 JWT (mandatory `kid`); the refresh
   token is an opaque rotating credential. The response contains no account id,
   email, session id, password, or token verifier.
+- **Second factor (phase 7).** When the account has TOTP confirmed, a correct password
+  does **not** return tokens: the response is **202 Accepted**
+  `{ "mfaToken": "<base64url, 43 chars>", "mfaTokenExpiresAt": "…", "method": "totp" }` and no
+  session exists until `POST /v1/auth/login/totp` succeeds. The token is a one-step bearer
+  secret (5-minute lifetime, 5 wrong codes, single use). If TOTP is required but the server's
+  Totp capability is off, login returns **503** rather than a password-only session (fail closed).
 - When public-exposure hardening is enabled: per-IP, per-normalized-email, and a
   process-wide login budget apply → generic **429** (`Retry-After` when available);
   an unresolvable trusted client IP → **503**. Bounded Argon2 work admission is
   **always** active (independent of hardening): if the hash queue is saturated or the
   bounded wait times out, login returns a generic **503** (`Retry-After: 1`) — never a
   credential 401 and never a token. See SECURITY_MODEL for the full policy.
+
+## `POST /v1/auth/login/totp`
+
+**Unauthenticated** second sign-in step. Exchanges the challenge token from the password step plus a
+6-digit TOTP code **or** a recovery code (`xxxxx-xxxxx`, case and separators ignored) for the same
+`TokenResponse` login returns. The session's client descriptor is the `User-Agent` of the password step.
+
+Request: `{ "mfaToken": "<from the 202>", "code": "123456" }` → **200 OK** (`TokenResponse`).
+
+- Every failure (unknown/expired/spent token, wrong code, replayed code, used recovery code,
+  password changed between the steps, TOTP disabled meanwhile) → one identical generic **401**
+  (`detail: "Invalid or expired sign-in code."`). No attempts-left hint. After **5** wrong codes the
+  challenge is spent and the password must be entered again.
+- A TOTP code is accepted within ±1 step (30 s) of the server's clock and **once**: the step is
+  recorded and no code for it, or for an older step, is accepted again. A recovery code is single use.
+- Totp capability off → **503**. Body over **4 KiB** → **413**. Under hardening a per-IP limit
+  (10 burst / 5 per 30 s) applies → **429**.
 
 ## `POST /v1/auth/refresh`
 
@@ -237,6 +261,36 @@ Request: `{ "password": "<current account password>" }` → **204 No Content**.
 - Argon2 admission overload → **503** (`Retry-After: 1`).
 - Under hardening: per-account limit (5 burst / 1 per 3 min, keyed by the server-issued account
   id) → generic **429**. After deletion the address can register again from scratch.
+
+## Two-factor authentication (`/v1/account/totp`)
+
+**Authenticated.** TOTP (RFC 6238: HMAC-SHA1, 6 digits, 30 s — what every authenticator app
+expects) for the caller's own account. All routes answer **503** when the Totp capability is off,
+**401** without a valid session, and **413** over 4 KiB. Under hardening a per-account limit
+(10 burst / 2 per 60 s) applies → **429**.
+
+- `GET /v1/account/totp` → **200** `{ "enabled": false, "confirmedAt": null,
+  "recoveryCodesRemaining": 0, "pendingEnrollment": false }`. No secret is ever included.
+- `POST /v1/account/totp/enroll` `{ "password": "<account password>" }` → **200**
+  `{ "secret": "<Base32>", "otpauthUri": "otpauth://totp/BitosX:<email>?secret=…&issuer=BitosX&algorithm=SHA1&digits=6&period=30",
+  "issuer": "BitosX", "label": "<email>", "digits": 6, "periodSeconds": 30 }`. The secret is
+  returned **exactly once**; the client shows it (and the URI, for a QR code) and never stores it.
+  A pending secret is **not** a second factor yet and is replaced by the next enroll call. Wrong
+  password → **403** generic; TOTP already enabled → **409** (disable first).
+- `POST /v1/account/totp/confirm` `{ "code": "123456" }` → **200**
+  `{ "recoveryCodes": ["abcde-fghjk", … ×10] }`. A first valid code for the pending secret turns
+  it into the account's second factor and issues **10 single-use recovery codes**, returned
+  exactly once (only keyed verifiers are stored). Wrong code → **400**; nothing pending → **409**.
+- `POST /v1/account/totp/disable` `{ "password": "…", "code": "<TOTP or recovery code>" }`
+  → **204**. Removes the second factor, every recovery code and every open challenge. Wrong
+  password or code → **403** generic (the password is checked first, so a wrong password never
+  consumes a code); not enabled → **409**.
+- `POST /v1/account/totp/recovery-codes` `{ "password": "…", "code": "…" }` → **200**
+  `{ "recoveryCodes": [ … ] }`: replaces every recovery code. Same failure contract as disable.
+
+Enabling TOTP changes only the **account** sign-in. The vault master password, the vault key and
+the encrypted envelope are unaffected. A password reset (phase 6) keeps TOTP enabled; deleting the
+account removes it.
 
 ## Encrypted-envelope sync (`/v1/sync`)
 

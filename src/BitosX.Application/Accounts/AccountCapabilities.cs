@@ -25,6 +25,13 @@ public sealed class AccountCapabilities
     public required bool EmailDeliveryEnabled { get; init; }
     public required bool LoginEnabled { get; init; }
 
+    /// <summary>
+    /// Second factor (TOTP): requires <see cref="LoginEnabled"/> plus <c>Security:TotpKey</c>, the key that encrypts
+    /// stored TOTP secrets and keys recovery-code verifiers. Without it, enrollment and the second sign-in step are
+    /// unavailable (503); an account that already has TOTP confirmed cannot sign in at all (fail closed, never a bypass).
+    /// </summary>
+    public bool TotpEnabled { get; init; }
+
     public static AccountCapabilities None { get; } = new()
     {
         AccountCoreEnabled = false,

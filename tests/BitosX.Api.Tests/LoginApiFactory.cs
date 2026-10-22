@@ -26,6 +26,9 @@ public sealed class LoginApiFactory : WebApplicationFactory<Program>
 
     private readonly string _testDbConnectionString;
 
+    /// <summary>When false the Totp capability is off (no Security:TotpKey): used to prove fail-closed behavior.</summary>
+    public bool TotpCapability { get; init; } = true;
+
     public LoginApiFactory()
     {
         var cfg = new ConfigurationBuilder().AddUserSecrets("bitosx-infrastructure-tests").Build();
@@ -44,6 +47,11 @@ public sealed class LoginApiFactory : WebApplicationFactory<Program>
         // Login capability: current signing key (>=32 bytes) + mandatory kid. Ephemeral per run.
         builder.UseSetting("Security:JwtSigningKey", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
         builder.UseSetting("Security:Jwt:KeyId", "test-k1");
+        // Totp capability: key for stored TOTP secrets + recovery-code verifiers. Ephemeral per run.
+        if (TotpCapability)
+        {
+            builder.UseSetting("Security:TotpKey", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
+        }
 
         builder.UseSetting("Security:Argon2:MemoryKiB", "8192");
         builder.UseSetting("Security:Argon2:Iterations", "1");

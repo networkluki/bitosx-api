@@ -2,6 +2,7 @@ using System.Security.Claims;
 using BitosX.Api.Security;
 using BitosX.Application.Abstractions.Persistence;
 using BitosX.Application.Accounts;
+using BitosX.Application.Mfa;
 using BitosX.Application.Security;
 using BitosX.Application.Sessions;
 using BitosX.Contracts.Accounts;
@@ -23,8 +24,8 @@ public static class AccountEndpoints
     /// <summary>Per-endpoint request-body cap for the password-confirmed delete (same as the auth endpoints).</summary>
     private const long MaxBodyBytes = 4 * 1024;
 
-    // One generic confirmation failure: wrong password and an account that cannot be deleted this way are
-    // indistinguishable. 403 (not 401) so a client does not mistake it for a dead session and sign out.
+    // One generic confirmation failure (deletion, TOTP management): wrong password/code and an account that cannot
+    // do this are indistinguishable. 403 (not 401) so a client does not mistake it for a dead session and sign out.
     private static IResult PasswordConfirmationFailed() => Results.Problem(
         statusCode: StatusCodes.Status403Forbidden, title: "Forbidden", detail: "Password confirmation failed.");
 
@@ -41,6 +42,21 @@ public static class AccountEndpoints
 
     private static async ValueTask<object?> RejectOversizedBody(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
         => context.HttpContext.Request.ContentLength is > MaxBodyBytes ? PayloadTooLarge() : await next(context);
+
+    private static IResult SecondFactorUnavailable() => Results.Problem(
+        statusCode: StatusCodes.Status503ServiceUnavailable, title: "Service unavailable", detail: "Two-factor authentication is temporarily unavailable.");
+
+    private static IResult TotpAlreadyEnabled() => Results.Problem(
+        statusCode: StatusCodes.Status409Conflict, title: "Conflict", detail: "Two-factor authentication is already enabled. Disable it first.");
+
+    private static IResult TotpNotPending() => Results.Problem(
+        statusCode: StatusCodes.Status409Conflict, title: "Conflict", detail: "There is no enrollment to confirm. Start enrollment first.");
+
+    private static IResult TotpNotEnabled() => Results.Problem(
+        statusCode: StatusCodes.Status409Conflict, title: "Conflict", detail: "Two-factor authentication is not enabled.");
+
+    private static IResult InvalidCode() => Results.Problem(
+        statusCode: StatusCodes.Status400BadRequest, title: "Invalid request", detail: "The code is not valid. Check the time on your device and try the next code.");
 
     // Identical 404 for a nonexistent AND a non-owned session — never discloses existence/ownership.
     private static IResult SessionNotFound() => Results.Problem(
@@ -135,6 +151,112 @@ public static class AccountEndpoints
         .AddEndpointFilter(RejectOversizedBody)
         .WithName("DeleteAccount");
 
+        MapTotpEndpoints(group);
         return app;
+    }
+
+    // ---- second factor (TOTP) — every route answers 503 when the Totp capability is off ----
+    private static void MapTotpEndpoints(RouteGroupBuilder group)
+    {
+        var totp = group.MapGroup("/totp").WithTags("Account");
+
+        totp.MapGet("", async (HttpContext http, AccountCapabilities capabilities, CancellationToken ct) =>
+        {
+            if (!TryGetAuthenticatedIds(http.User, out var accountId, out _)) return Unauthenticated();
+            if (!capabilities.TotpEnabled) return SecondFactorUnavailable();
+            var status = await http.RequestServices.GetRequiredService<ITotpEnrollmentService>().GetStatusAsync(accountId, ct);
+            return Results.Ok(new TotpStatusResponse(status.Enabled, status.ConfirmedAt, status.RecoveryCodesRemaining, status.PendingEnrollment));
+        }).WithName("TotpStatus");
+
+        totp.MapPost("/enroll", async (TotpEnrollRequest request, HttpContext http, AccountCapabilities capabilities, TotpOptions options, CancellationToken ct) =>
+        {
+            if (!TryGetAuthenticatedIds(http.User, out var accountId, out _)) return Unauthenticated();
+            if (!capabilities.TotpEnabled) return SecondFactorUnavailable();
+            TotpBeginResult result;
+            try
+            {
+                result = await http.RequestServices.GetRequiredService<ITotpEnrollmentService>().BeginAsync(accountId, request.Password, ct);
+            }
+            catch (PasswordHashingCapacityExceededException)
+            {
+                return CapacityUnavailable(http);
+            }
+
+            return result.Outcome switch
+            {
+                TotpBeginOutcome.Started => Results.Ok(new TotpEnrollResponse(result.SecretBase32!, result.OtpauthUri!, result.Issuer!, result.Label!, options.Digits, options.PeriodSeconds)),
+                TotpBeginOutcome.AlreadyEnabled => TotpAlreadyEnabled(),
+                _ => PasswordConfirmationFailed(),
+            };
+        })
+        .AddEndpointFilter(AuthRateLimiting.TotpManagePerAccountFilter)
+        .AddEndpointFilter(RejectOversizedBody)
+        .WithName("TotpEnroll");
+
+        totp.MapPost("/confirm", async (TotpConfirmRequest request, HttpContext http, AccountCapabilities capabilities, CancellationToken ct) =>
+        {
+            if (!TryGetAuthenticatedIds(http.User, out var accountId, out _)) return Unauthenticated();
+            if (!capabilities.TotpEnabled) return SecondFactorUnavailable();
+            var result = await http.RequestServices.GetRequiredService<ITotpEnrollmentService>().ConfirmAsync(accountId, request.Code, ct);
+            return result.Outcome switch
+            {
+                TotpConfirmResult.Confirmed => Results.Ok(new TotpRecoveryCodesResponse(result.RecoveryCodes)),
+                TotpConfirmResult.NotPending => TotpNotPending(),
+                _ => InvalidCode(),
+            };
+        })
+        .AddEndpointFilter(AuthRateLimiting.TotpManagePerAccountFilter)
+        .AddEndpointFilter(RejectOversizedBody)
+        .WithName("TotpConfirm");
+
+        totp.MapPost("/disable", async (TotpManageRequest request, HttpContext http, AccountCapabilities capabilities, CancellationToken ct) =>
+        {
+            if (!TryGetAuthenticatedIds(http.User, out var accountId, out _)) return Unauthenticated();
+            if (!capabilities.TotpEnabled) return SecondFactorUnavailable();
+            TotpManageOutcome outcome;
+            try
+            {
+                outcome = await http.RequestServices.GetRequiredService<ITotpEnrollmentService>().DisableAsync(accountId, request.Password, request.Code, ct);
+            }
+            catch (PasswordHashingCapacityExceededException)
+            {
+                return CapacityUnavailable(http);
+            }
+
+            return outcome switch
+            {
+                TotpManageOutcome.Succeeded => Results.NoContent(),
+                TotpManageOutcome.NotEnabled => TotpNotEnabled(),
+                _ => PasswordConfirmationFailed(),
+            };
+        })
+        .AddEndpointFilter(AuthRateLimiting.TotpManagePerAccountFilter)
+        .AddEndpointFilter(RejectOversizedBody)
+        .WithName("TotpDisable");
+
+        totp.MapPost("/recovery-codes", async (TotpManageRequest request, HttpContext http, AccountCapabilities capabilities, CancellationToken ct) =>
+        {
+            if (!TryGetAuthenticatedIds(http.User, out var accountId, out _)) return Unauthenticated();
+            if (!capabilities.TotpEnabled) return SecondFactorUnavailable();
+            TotpRecoveryCodesResult result;
+            try
+            {
+                result = await http.RequestServices.GetRequiredService<ITotpEnrollmentService>().RegenerateRecoveryCodesAsync(accountId, request.Password, request.Code, ct);
+            }
+            catch (PasswordHashingCapacityExceededException)
+            {
+                return CapacityUnavailable(http);
+            }
+
+            return result.Outcome switch
+            {
+                TotpManageOutcome.Succeeded => Results.Ok(new TotpRecoveryCodesResponse(result.RecoveryCodes)),
+                TotpManageOutcome.NotEnabled => TotpNotEnabled(),
+                _ => PasswordConfirmationFailed(),
+            };
+        })
+        .AddEndpointFilter(AuthRateLimiting.TotpManagePerAccountFilter)
+        .AddEndpointFilter(RejectOversizedBody)
+        .WithName("TotpRecoveryCodes");
     }
 }

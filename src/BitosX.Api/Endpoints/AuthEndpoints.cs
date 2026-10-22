@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using BitosX.Api.Security;
 using BitosX.Application.Accounts;
+using BitosX.Application.Mfa;
 using BitosX.Application.Security;
 using BitosX.Application.Sessions;
 using BitosX.Application.Verification;
@@ -40,6 +41,14 @@ public static class AuthEndpoints
     // the response never discloses which token/session state was hit (anti-enumeration, §11.1).
     private static IResult InvalidRefresh() => Results.Problem(
         statusCode: StatusCodes.Status401Unauthorized, title: "Unauthorized", detail: "Invalid or expired refresh token.");
+
+    // Second-step failures (unknown/expired/spent challenge, wrong code, changed password, TOTP disabled meanwhile)
+    // all collapse to one generic 401 — never which one, never the attempts left.
+    private static IResult InvalidMfa() => Results.Problem(
+        statusCode: StatusCodes.Status401Unauthorized, title: "Unauthorized", detail: "Invalid or expired sign-in code.");
+
+    private static IResult SecondFactorUnavailable() => Results.Problem(
+        statusCode: StatusCodes.Status503ServiceUnavailable, title: "Service unavailable", detail: "Two-factor sign-in is temporarily unavailable.");
 
     private static IResult Unauthenticated() => Results.Problem(
         statusCode: StatusCodes.Status401Unauthorized, title: "Unauthorized", detail: "Authentication required.");
@@ -218,10 +227,17 @@ public static class AuthEndpoints
                 return CapacityUnavailable(http);
             }
 
-            return result.Outcome == LoginOutcome.Succeeded
-                ? Results.Ok(new TokenResponse(
-                    result.AccessToken!, result.AccessTokenExpiresAt, result.RefreshToken!, result.RefreshTokenExpiresAt))
-                : InvalidCredentials();
+            return result.Outcome switch
+            {
+                LoginOutcome.Succeeded => Results.Ok(new TokenResponse(
+                    result.AccessToken!, result.AccessTokenExpiresAt, result.RefreshToken!, result.RefreshTokenExpiresAt)),
+                // Password accepted, second factor required: 202 with the one-step challenge token, no session yet.
+                LoginOutcome.MfaRequired => Results.Json(
+                    new MfaChallengeResponse(result.MfaToken!, result.MfaTokenExpiresAt), statusCode: StatusCodes.Status202Accepted),
+                // TOTP required but the server cannot verify codes: refuse (never a password-only session).
+                LoginOutcome.MfaUnavailable => SecondFactorUnavailable(),
+                _ => InvalidCredentials(),
+            };
         })
         // Order (§2D.2): per-IP → 4 KiB body → per-normalized-email → process-wide budget → credential/Argon2 → jitter.
         .AddEndpointFilter(AuthRateLimiting.LoginPerIpFilter)
@@ -229,6 +245,40 @@ public static class AuthEndpoints
         .AddEndpointFilter(AuthRateLimiting.LoginPerEmailFilter)
         .AddEndpointFilter(AuthRateLimiting.GlobalLoginBudgetFilter)
         .WithName("Login");
+
+        // Second sign-in step: UNAUTHENTICATED (there is no session yet); identity comes from the opaque
+        // challenge token issued by the password step, never from the body. No Argon2 runs here.
+        group.MapPost("/login/totp", async (TotpLoginRequest request, HttpContext http, AccountCapabilities capabilities, ILoginResponseJitter jitter, CancellationToken ct) =>
+        {
+            if (!capabilities.TotpEnabled)
+            {
+                return SecondFactorUnavailable();
+            }
+
+            var service = http.RequestServices.GetRequiredService<IMfaLoginService>();
+            var result = await service.CompleteAsync(new MfaLoginCommand(request.MfaToken, request.Code), ct);
+
+            try
+            {
+                await jitter.ApplyAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                return CapacityUnavailable(http);
+            }
+
+            return result.Outcome == LoginOutcome.Succeeded
+                ? Results.Ok(new TokenResponse(
+                    result.AccessToken!, result.AccessTokenExpiresAt, result.RefreshToken!, result.RefreshTokenExpiresAt))
+                : InvalidMfa();
+        })
+        .AddEndpointFilter(AuthRateLimiting.MfaPerIpFilter)
+        .AddEndpointFilter(RejectOversizedBody)
+        .WithName("LoginTotp");
 
         // Refresh is UNAUTHENTICATED: the access token may already be expired. Identity is resolved
         // from the opaque refresh token by the store (strict reuse handled there), never from claims.
