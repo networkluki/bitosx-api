@@ -82,7 +82,11 @@ These are **not** verifiable from this repository. Each is a blocker until confi
   section), so a 16 MiB encrypted envelope (`/v1/sync/envelope`) can be written in one statement. Below
   that an upload fails as a server error; nothing is partially written.
 - **[host] Secrets supplied outside source control** — JWT signing key(s), DB credentials, SMTP/outbox
-  keys provided via a secret store / environment, never committed.
+  keys, and the TOTP key (`Security:TotpKey`, Base64 of 32 random bytes, e.g.
+  `openssl rand -base64 32`) provided via a secret store / environment, never committed. Without
+  `Security:TotpKey` two-factor enrollment is unavailable and any account that already has TOTP is
+  refused at login (fail closed); rotating the key invalidates every stored TOTP secret and recovery
+  code (users must re-enroll), so treat it like the JWT key: back it up, never rotate casually.
 
 ## Deferred (separate future decisions — not in Phase 2D)
 

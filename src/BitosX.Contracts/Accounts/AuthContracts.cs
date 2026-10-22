@@ -63,3 +63,34 @@ public sealed record MeResponse(Guid AccountId, string Email, bool EmailVerified
 /// (Decision 8): it is a management view, not session history or a credential.
 /// </summary>
 public sealed record SessionResponse(Guid Id, DateTime CreatedAt, DateTime LastSeenAt, DateTime ExpiresAt, bool Current);
+
+/// <summary>
+/// Answer to <c>POST /v1/auth/login</c> (HTTP 202) when the account has a second factor: the password was
+/// accepted, no session exists yet, and the client must present <see cref="MfaToken"/> with a code at
+/// <c>POST /v1/auth/login/totp</c> before it expires. The token is an opaque bearer secret for that one step.
+/// </summary>
+public sealed record MfaChallengeResponse(string MfaToken, DateTime MfaTokenExpiresAt, string Method = "totp");
+
+/// <summary>Second sign-in step: the challenge token from step one and a TOTP code or a recovery code.</summary>
+public sealed record TotpLoginRequest(string MfaToken, string Code);
+
+/// <summary>Starts TOTP enrollment for the caller's account; confirmed with the account password.</summary>
+public sealed record TotpEnrollRequest(string Password);
+
+/// <summary>
+/// The new TOTP secret, returned exactly once at enrollment, as Base32 and as the Key URI authenticator apps
+/// read. The client shows it and never stores it.
+/// </summary>
+public sealed record TotpEnrollResponse(string Secret, string OtpauthUri, string Issuer, string Label, int Digits, int PeriodSeconds);
+
+/// <summary>Confirms a pending enrollment with a first valid code from the authenticator app.</summary>
+public sealed record TotpConfirmRequest(string Code);
+
+/// <summary>Single-use recovery codes, returned exactly once (at confirmation or regeneration).</summary>
+public sealed record TotpRecoveryCodesResponse(IReadOnlyList<string> RecoveryCodes);
+
+/// <summary>Disables TOTP, or regenerates recovery codes: the account password plus a current TOTP or recovery code.</summary>
+public sealed record TotpManageRequest(string Password, string Code);
+
+/// <summary>The caller's second-factor state (<c>GET /v1/account/totp</c>). Carries no secret.</summary>
+public sealed record TotpStatusResponse(bool Enabled, DateTime? ConfirmedAt, int RecoveryCodesRemaining, bool PendingEnrollment);

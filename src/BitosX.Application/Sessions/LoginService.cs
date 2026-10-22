@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
+using System.Text;
 using BitosX.Application.Abstractions.Persistence;
 using BitosX.Application.Accounts;
+using BitosX.Application.Mfa;
 using BitosX.Application.Security;
 
 namespace BitosX.Application.Sessions;
@@ -22,19 +24,34 @@ public sealed class LoginService : ILoginService
     private readonly IRefreshTokenFactory _refreshTokenFactory;
     private readonly ISessionStore _sessionStore;
     private readonly IAccessTokenService _accessTokenService;
+    private readonly ITotpStore _totp;
+    private readonly IMfaChallengeStore _mfaChallenges;
+    private readonly TotpOptions _totpOptions;
+    private readonly SecondFactorAvailability _secondFactor;
+    private readonly TimeProvider _clock;
 
     public LoginService(
         IAccountRepository accounts,
         IAccountPasswordHasher passwordHasher,
         IRefreshTokenFactory refreshTokenFactory,
         ISessionStore sessionStore,
-        IAccessTokenService accessTokenService)
+        IAccessTokenService accessTokenService,
+        ITotpStore totp,
+        IMfaChallengeStore mfaChallenges,
+        TotpOptions totpOptions,
+        SecondFactorAvailability secondFactor,
+        TimeProvider clock)
     {
         _accounts = accounts;
         _passwordHasher = passwordHasher;
         _refreshTokenFactory = refreshTokenFactory;
         _sessionStore = sessionStore;
         _accessTokenService = accessTokenService;
+        _totp = totp;
+        _mfaChallenges = mfaChallenges;
+        _totpOptions = totpOptions;
+        _secondFactor = secondFactor;
+        _clock = clock;
     }
 
     public async Task<LoginResult> LoginAsync(LoginCommand command, CancellationToken cancellationToken = default)
@@ -73,6 +90,33 @@ public sealed class LoginService : ILoginService
         }
         // Success or NeedsRehash → authenticate now; opportunistic rehash is deferred (no hash update here).
 
+        // Second factor: a confirmed TOTP enrollment turns the password into step one. No session, no
+        // JWT, no refresh token is issued here — only an opaque, short-lived challenge token whose verifier
+        // is stored together with a fingerprint of the hash that was just verified.
+        var enrollment = await _totp.GetAsync(candidate.Id, cancellationToken).ConfigureAwait(false);
+        if (enrollment is { IsConfirmed: true })
+        {
+            if (!_secondFactor.Enabled)
+            {
+                return LoginResult.MfaUnavailable; // the server cannot verify codes: refuse, never bypass
+            }
+
+            var mfa = _refreshTokenFactory.Generate(); // same 256-bit opaque token + SHA-256 verifier scheme
+            try
+            {
+                var now = _clock.GetUtcNow().UtcDateTime;
+                var expiresAt = now + _totpOptions.MfaChallengeLifetime;
+                await _mfaChallenges.CreateAsync(new MfaChallenge(
+                    Guid.NewGuid(), candidate.Id, mfa.Verifier, PasswordHashFingerprint(candidate.PasswordHash),
+                    command.UserAgent, now, expiresAt), cancellationToken).ConfigureAwait(false);
+                return LoginResult.MfaRequired(mfa.TokenBase64Url, expiresAt);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(mfa.Verifier);
+            }
+        }
+
         var generated = _refreshTokenFactory.Generate();
         try
         {
@@ -102,4 +146,7 @@ public sealed class LoginService : ILoginService
             CryptographicOperations.ZeroMemory(generated.Verifier);
         }
     }
+
+    /// <summary>SHA-256 of the PHC string: lets the second step detect a password change without storing the hash twice.</summary>
+    public static byte[] PasswordHashFingerprint(string passwordHashPhc) => SHA256.HashData(Encoding.UTF8.GetBytes(passwordHashPhc));
 }

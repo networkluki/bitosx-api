@@ -1,6 +1,7 @@
 using BitosX.Application.Abstractions.Persistence;
 using BitosX.Application.Accounts;
 using BitosX.Application.Email;
+using BitosX.Application.Mfa;
 using BitosX.Application.Security;
 using BitosX.Application.Sessions;
 using BitosX.Application.Verification;
@@ -18,6 +19,7 @@ namespace BitosX.Infrastructure.Accounts;
 /// capabilities are registered separately so that, e.g., login/account-core can
 /// run with SMTP delivery disabled:
 ///   - AccountCore        : DB + password hashing (+ future login/session/JWT)
+///   - Totp               : second factor on top of Login (Security:TotpKey)
 ///   - EmailVerification  : register/verify/resend + forgot/reset-password + outbox persistence (pepper + outbox key)
 ///   - EmailDelivery      : Gmail SMTP sender + background dispatcher (SMTP credentials)
 ///
@@ -99,12 +101,30 @@ public static class AccountsServiceCollectionExtensions
             login = false;
         }
 
+        // Totp: the key that encrypts stored TOTP secrets (and keys recovery-code verifiers). Requires Login;
+        // present-but-malformed fails closed. Absent → second factor unavailable (never a bypass: an account
+        // with TOTP confirmed is refused at login).
+        var totpKeySet = !string.IsNullOrWhiteSpace(configuration["Security:TotpKey"]);
+        var totp = false;
+        if (totpKeySet)
+        {
+            if (!login)
+            {
+                throw new InvalidOperationException("Security:TotpKey requires the Login capability (Security:JwtSigningKey).");
+            }
+
+            _ = new AesGcmTotpCrypto(new TotpCryptoOptions { Key = configuration["Security:TotpKey"]! }); // throws on malformed
+            BuildValidatedTotpOptions(configuration);
+            totp = true;
+        }
+
         return new AccountCapabilities
         {
             AccountCoreEnabled = true,
             EmailVerificationEnabled = verification,
             EmailDeliveryEnabled = delivery,
             LoginEnabled = login,
+            TotpEnabled = totp,
         };
     }
 
@@ -166,6 +186,23 @@ public static class AccountsServiceCollectionExtensions
         ValidateRefreshLifetimes(refresh);
 
         return (jwt, refresh);
+    }
+
+    /// <summary>Binds + validates the non-secret TOTP policy (fail closed). Shared by DetectCapabilities and AddBitosxLogin.</summary>
+    private static TotpOptions BuildValidatedTotpOptions(IConfiguration configuration)
+    {
+        var options = new TotpOptions();
+        var section = configuration.GetSection(TotpOptions.SectionName);
+        if (section["Issuer"] is { } issuer) options.Issuer = issuer;
+        if (section.GetValue<int?>("Digits") is { } digits) options.Digits = digits;
+        if (section.GetValue<int?>("PeriodSeconds") is { } period) options.PeriodSeconds = period;
+        if (section.GetValue<int?>("WindowSteps") is { } window) options.WindowSteps = window;
+        if (section.GetValue<int?>("SecretBytes") is { } secretBytes) options.SecretBytes = secretBytes;
+        if (section.GetValue<int?>("MfaChallengeLifetimeSeconds") is { } lifetime) options.MfaChallengeLifetime = TimeSpan.FromSeconds(lifetime);
+        if (section.GetValue<int?>("MaxMfaAttempts") is { } attempts) options.MaxMfaAttempts = attempts;
+        if (section.GetValue<int?>("RecoveryCodeCount") is { } codes) options.RecoveryCodeCount = codes;
+        options.Validate();
+        return options;
     }
 
     private static TimeSpan SecondsToTimeSpan(long seconds, string configKey)
@@ -301,6 +338,14 @@ public static class AccountsServiceCollectionExtensions
         services.AddSingleton<ISessionStore>(sp =>
             new SessionStore(connectionFactory, sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<RefreshTokenOptions>()));
 
+        // Second-factor persistence is part of Login (DB only): the login service must be able to see that an
+        // account has TOTP confirmed even when the Totp crypto capability is off, so it can refuse rather than bypass.
+        services.AddSingleton(BuildValidatedTotpOptions(configuration));
+        // Same presence test as DetectCapabilities (the key itself is validated there and in AddBitosxTotp).
+        services.AddSingleton(new SecondFactorAvailability(!string.IsNullOrWhiteSpace(configuration["Security:TotpKey"])));
+        services.AddSingleton<ITotpStore>(_ => new TotpStore(connectionFactory));
+        services.AddSingleton<IMfaChallengeStore>(_ => new MfaChallengeStore(connectionFactory));
+
         // Application orchestration services (per-request).
         services.AddScoped<ILoginService, LoginService>();
         services.AddScoped<IRefreshService, RefreshService>();
@@ -311,6 +356,29 @@ public static class AccountsServiceCollectionExtensions
         services.AddSingleton<IAccountDeletionStore>(_ => new AccountDeletionStore(connectionFactory));
         services.AddScoped<IAccountDeletionService, AccountDeletionService>();
 
+        return services;
+    }
+
+    // ---- Totp: second factor (encrypted secrets, recovery codes, second sign-in step) ----
+
+    /// <summary>
+    /// Composes the Totp capability on top of Login: the AES-GCM/HMAC crypto under <c>Security:TotpKey</c>
+    /// (fail closed on a malformed key), the code verifier, the second sign-in step and enrollment management.
+    /// </summary>
+    public static IServiceCollection AddBitosxTotp(this IServiceCollection services, IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        var crypto = new AesGcmTotpCrypto(new TotpCryptoOptions
+        {
+            Key = configuration["Security:TotpKey"] ?? throw new InvalidOperationException("Security:TotpKey is required for Totp."),
+        });
+
+        services.AddSingleton<ITotpCrypto>(crypto);
+        services.AddScoped<MfaCodeVerifier>();
+        services.AddScoped<IMfaLoginService, MfaLoginService>();
+        services.AddScoped<ITotpEnrollmentService, TotpEnrollmentService>();
         return services;
     }
 

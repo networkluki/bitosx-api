@@ -75,6 +75,8 @@ public sealed class HardenedAuthApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("Security:EmailOutboxKey", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
         builder.UseSetting("Security:JwtSigningKey", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
         builder.UseSetting("Security:Jwt:KeyId", "test-k1");
+        // Totp capability: key for stored TOTP secrets + recovery-code verifiers. Ephemeral per run.
+        builder.UseSetting("Security:TotpKey", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
         builder.UseSetting("Security:Argon2:MemoryKiB", "8192");
         builder.UseSetting("Security:Argon2:Iterations", "1");
         builder.UseSetting("Security:Argon2:MaxConcurrency", "2");

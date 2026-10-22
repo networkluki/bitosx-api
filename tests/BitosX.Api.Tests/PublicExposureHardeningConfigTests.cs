@@ -57,12 +57,20 @@ public sealed class PublicExposureHardeningConfigTests
         Assert.Equal(5, o.AccountDeletePerAccount.TokenLimit);
         Assert.Equal(1, o.AccountDeletePerAccount.TokensPerPeriod);
         Assert.Equal(180, o.AccountDeletePerAccount.ReplenishmentSeconds);
+        Assert.Equal(10, o.MfaPerIp.TokenLimit);
+        Assert.Equal(5, o.MfaPerIp.TokensPerPeriod);
+        Assert.Equal(30, o.MfaPerIp.ReplenishmentSeconds);
+        Assert.Equal(10, o.TotpManagePerAccount.TokenLimit);
+        Assert.Equal(2, o.TotpManagePerAccount.TokensPerPeriod);
+        Assert.Equal(60, o.TotpManagePerAccount.ReplenishmentSeconds);
     }
 
     [Fact] public void SyncWrite_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "SyncWritePerAccount:TokenLimit"] = "0" }));
     [Fact] public void PasswordResetPerIp_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasswordResetPerIp:TokenLimit"] = "0" }));
     [Fact] public void PasswordResetPerEmail_ZeroReplenishment_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasswordResetPerEmail:ReplenishmentSeconds"] = "0" }));
     [Fact] public void AccountDeletePerAccount_TokensPerPeriodExceedsLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "AccountDeletePerAccount:TokensPerPeriod"] = "999" }));
+    [Fact] public void MfaPerIp_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "MfaPerIp:TokenLimit"] = "0" }));
+    [Fact] public void TotpManagePerAccount_ZeroReplenishment_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "TotpManagePerAccount:ReplenishmentSeconds"] = "0" }));
     [Fact] public void SyncWrite_TokensPerPeriodExceedsLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "SyncWritePerAccount:TokensPerPeriod"] = "999" }));
 
     [Fact] public void ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "LoginPerIp:TokenLimit"] = "0" }));

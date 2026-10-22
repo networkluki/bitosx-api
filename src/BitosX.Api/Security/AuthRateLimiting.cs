@@ -30,6 +30,12 @@ public sealed class AuthRateLimiters : IDisposable
     /// <summary>Account deletion attempts, partitioned by the authenticated account id.</summary>
     public BoundedRateLimiterCache AccountDeletePerAccount { get; }
 
+    /// <summary>Second sign-in step, partitioned by trusted client IP.</summary>
+    public BoundedRateLimiterCache MfaPerIp { get; }
+
+    /// <summary>TOTP management, partitioned by the authenticated account id.</summary>
+    public BoundedRateLimiterCache TotpManagePerAccount { get; }
+
     /// <summary>One process-wide token bucket shared across all IPs and all accounts/emails (no partition key).</summary>
     public TokenBucketRateLimiter GlobalLoginBudget { get; }
 
@@ -43,6 +49,8 @@ public sealed class AuthRateLimiters : IDisposable
         PasswordResetPerIp = new BoundedRateLimiterCache(options.PasswordResetPerIp, options.PartitionState.MaxIpPartitions, idle, clock);
         PasswordResetPerEmail = new BoundedRateLimiterCache(options.PasswordResetPerEmail, options.PartitionState.MaxEmailPartitions, idle, clock);
         AccountDeletePerAccount = new BoundedRateLimiterCache(options.AccountDeletePerAccount, options.PartitionState.MaxEmailPartitions, idle, clock);
+        MfaPerIp = new BoundedRateLimiterCache(options.MfaPerIp, options.PartitionState.MaxIpPartitions, idle, clock);
+        TotpManagePerAccount = new BoundedRateLimiterCache(options.TotpManagePerAccount, options.PartitionState.MaxEmailPartitions, idle, clock);
         GlobalLoginBudget = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
         {
             TokenLimit = options.GlobalLoginBudget.TokenLimit,
@@ -63,6 +71,8 @@ public sealed class AuthRateLimiters : IDisposable
         PasswordResetPerIp.Dispose();
         PasswordResetPerEmail.Dispose();
         AccountDeletePerAccount.Dispose();
+        MfaPerIp.Dispose();
+        TotpManagePerAccount.Dispose();
         GlobalLoginBudget.Dispose();
     }
 }
@@ -104,6 +114,10 @@ public static class AuthRateLimiting
     /// <summary>Per-IP refresh limit; same 503-on-unresolvable-IP behavior.</summary>
     public static async ValueTask<object?> RefreshPerIpFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
         => await PerIpAsync(context, next, static r => r.RefreshPerIp);
+
+    /// <summary>Per-IP second-sign-in-step limit; same 503-on-unresolvable-IP behavior.</summary>
+    public static async ValueTask<object?> MfaPerIpFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+        => await PerIpAsync(context, next, static r => r.MfaPerIp);
 
     /// <summary>Per-IP forgot/reset-password limit; same 503-on-unresolvable-IP behavior.</summary>
     public static async ValueTask<object?> PasswordResetPerIpFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
@@ -147,6 +161,10 @@ public static class AuthRateLimiting
     /// </summary>
     public static async ValueTask<object?> SyncWritePerAccountFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
         => await PerAccountAsync(context, next, static r => r.SyncWritePerAccount);
+
+    /// <summary>Per-account limit on TOTP management calls (same keying as the sync write limiter).</summary>
+    public static async ValueTask<object?> TotpManagePerAccountFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+        => await PerAccountAsync(context, next, static r => r.TotpManagePerAccount);
 
     /// <summary>Per-account limit on password-confirmed account deletion attempts (same keying as the sync write limiter).</summary>
     public static async ValueTask<object?> AccountDeletePerAccountFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
