@@ -103,6 +103,11 @@ if (capabilities.AccountCoreEnabled)
     builder.Services.AddBitosxPersistence(bitosxConnectionString!, bitosxMigratorConnectionString);
     builder.Services.AddBitosxAccountCore(builder.Configuration);
 
+    // Phase 2D.1: bind + validate public-exposure hardening (fail-closed) and register the auth rate
+    // limiters. Inert unless Security:PublicExposureHardening:Enabled is true. Composed with AccountCore
+    // (not Login) because the forgot/reset-password limiters ride on EmailVerification alone.
+    builder.Services.AddPublicExposureHardening(builder.Configuration);
+
     if (capabilities.EmailVerificationEnabled)
     {
         builder.Services.AddBitosxEmailVerification(builder.Configuration, bitosxConnectionString!);
@@ -127,10 +132,6 @@ if (capabilities.AccountCoreEnabled)
         // Encrypted-envelope sync rides on Login: every sync endpoint is authenticated by the session JWT.
         // The server stores the desktop vault file as opaque ciphertext; limits are validated fail-closed.
         builder.Services.AddBitosxVaultSync(builder.Configuration, bitosxConnectionString!);
-
-        // Phase 2D.1: bind + validate public-exposure hardening (fail-closed) and register the auth
-        // rate limiters. Inert unless Security:PublicExposureHardening:Enabled is true.
-        builder.Services.AddPublicExposureHardening(builder.Configuration);
 
         builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
         builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
@@ -188,9 +189,9 @@ app.MapInfrastructureEndpoints();
 // Future versioned business API surface (currently empty).
 app.MapApiV1();
 
-// Auth endpoints are exposed when EmailVerification is available. register/resend
-// return a generic 503 when EmailDelivery is unavailable (routes stay mapped);
-// verify-email remains available so already-issued links can be consumed.
+// Auth endpoints are exposed when EmailVerification is available. register/resend/forgot-password
+// return a generic 503 when EmailDelivery is unavailable (routes stay mapped); verify-email and
+// reset-password remain available so already-issued links can be consumed.
 if (capabilities.EmailVerificationEnabled)
 {
     app.MapAuthEndpoints();

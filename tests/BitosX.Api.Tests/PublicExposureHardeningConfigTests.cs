@@ -48,9 +48,21 @@ public sealed class PublicExposureHardeningConfigTests
         Assert.Equal(30, o.SyncWritePerAccount.TokenLimit);
         Assert.Equal(10, o.SyncWritePerAccount.TokensPerPeriod);
         Assert.Equal(60, o.SyncWritePerAccount.ReplenishmentSeconds);
+        Assert.Equal(5, o.PasswordResetPerIp.TokenLimit);
+        Assert.Equal(2, o.PasswordResetPerIp.TokensPerPeriod);
+        Assert.Equal(60, o.PasswordResetPerIp.ReplenishmentSeconds);
+        Assert.Equal(3, o.PasswordResetPerEmail.TokenLimit);
+        Assert.Equal(1, o.PasswordResetPerEmail.TokensPerPeriod);
+        Assert.Equal(300, o.PasswordResetPerEmail.ReplenishmentSeconds);
+        Assert.Equal(5, o.AccountDeletePerAccount.TokenLimit);
+        Assert.Equal(1, o.AccountDeletePerAccount.TokensPerPeriod);
+        Assert.Equal(180, o.AccountDeletePerAccount.ReplenishmentSeconds);
     }
 
     [Fact] public void SyncWrite_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "SyncWritePerAccount:TokenLimit"] = "0" }));
+    [Fact] public void PasswordResetPerIp_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasswordResetPerIp:TokenLimit"] = "0" }));
+    [Fact] public void PasswordResetPerEmail_ZeroReplenishment_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasswordResetPerEmail:ReplenishmentSeconds"] = "0" }));
+    [Fact] public void AccountDeletePerAccount_TokensPerPeriodExceedsLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "AccountDeletePerAccount:TokensPerPeriod"] = "999" }));
     [Fact] public void SyncWrite_TokensPerPeriodExceedsLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "SyncWritePerAccount:TokensPerPeriod"] = "999" }));
 
     [Fact] public void ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "LoginPerIp:TokenLimit"] = "0" }));

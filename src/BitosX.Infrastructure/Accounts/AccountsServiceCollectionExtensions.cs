@@ -18,7 +18,7 @@ namespace BitosX.Infrastructure.Accounts;
 /// capabilities are registered separately so that, e.g., login/account-core can
 /// run with SMTP delivery disabled:
 ///   - AccountCore        : DB + password hashing (+ future login/session/JWT)
-///   - EmailVerification  : register/verify/resend + outbox persistence (pepper + outbox key)
+///   - EmailVerification  : register/verify/resend + forgot/reset-password + outbox persistence (pepper + outbox key)
 ///   - EmailDelivery      : Gmail SMTP sender + background dispatcher (SMTP credentials)
 ///
 /// Presence vs. malformed: an OPTIONAL capability whose secrets are ABSENT is simply
@@ -307,6 +307,10 @@ public static class AccountsServiceCollectionExtensions
         services.AddScoped<ISessionManagementService, SessionManagementService>();
         services.AddScoped<ISessionAuthenticator, SessionAuthenticator>();
 
+        // Account deletion is an authenticated operation (password-confirmed), so it is composed with Login.
+        services.AddSingleton<IAccountDeletionStore>(_ => new AccountDeletionStore(connectionFactory));
+        services.AddScoped<IAccountDeletionService, AccountDeletionService>();
+
         return services;
     }
 
@@ -350,8 +354,12 @@ public static class AccountsServiceCollectionExtensions
         services.AddSingleton<IEmailVerificationStore>(sp => new EmailVerificationStore(connectionFactory, sp.GetRequiredService<TimeProvider>()));
         services.AddSingleton<IEmailOutboxStore>(_ => new EmailOutboxStore(connectionFactory));
 
+        services.AddSingleton<IPasswordResetStore>(sp => new PasswordResetStore(connectionFactory, sp.GetRequiredService<TimeProvider>()));
+
         services.AddScoped<IAccountRegistrationService, AccountRegistrationService>();
         services.AddScoped<IEmailVerificationService, EmailVerificationService>();
+        // Password reset by emailed link rides on the same pepper/outbox machinery as verification.
+        services.AddScoped<IPasswordResetService, PasswordResetService>();
         return services;
     }
 

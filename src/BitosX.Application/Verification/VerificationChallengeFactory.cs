@@ -10,13 +10,18 @@ public sealed record PreparedChallenge(
     DateTime ExpiresAtUtc);
 
 /// <summary>
-/// Builds a fresh verification challenge (verifier only) and its AES-GCM-encrypted
-/// outbox message for an account. Centralizes token/payload construction shared by
-/// registration and resend.
+/// Builds a fresh challenge (verifier only) and its AES-GCM-encrypted outbox message for an
+/// account. Centralizes token/payload construction shared by registration, resend and
+/// password reset. The outbox message type matches the challenge purpose, and the AEAD AAD
+/// binds that type, so a row cannot be re-purposed after the fact.
 /// </summary>
 public interface IVerificationChallengeFactory
 {
+    /// <summary>Email-verification challenge (activate account + set first password).</summary>
     PreparedChallenge Create(Guid accountId, string recipientEmail, DateTime nowUtc);
+
+    /// <summary>Password-reset challenge (replace the password of a verified account).</summary>
+    PreparedChallenge CreatePasswordReset(Guid accountId, string recipientEmail, DateTime nowUtc);
 }
 
 public sealed class VerificationChallengeFactory : IVerificationChallengeFactory
@@ -36,6 +41,12 @@ public sealed class VerificationChallengeFactory : IVerificationChallengeFactory
     }
 
     public PreparedChallenge Create(Guid accountId, string recipientEmail, DateTime nowUtc)
+        => Build(accountId, recipientEmail, nowUtc, ChallengePurposes.EmailVerification, OutboxMessageTypes.EmailVerification);
+
+    public PreparedChallenge CreatePasswordReset(Guid accountId, string recipientEmail, DateTime nowUtc)
+        => Build(accountId, recipientEmail, nowUtc, ChallengePurposes.PasswordReset, OutboxMessageTypes.PasswordReset);
+
+    private PreparedChallenge Build(Guid accountId, string recipientEmail, DateTime nowUtc, string purpose, string messageType)
     {
         var token = _tokens.GenerateToken();
         var challengeId = Guid.NewGuid();
@@ -46,6 +57,7 @@ public sealed class VerificationChallengeFactory : IVerificationChallengeFactory
         {
             Id = challengeId,
             AccountId = accountId,
+            Purpose = purpose,
             TokenHash = token.VerifierHash,
             CreatedAt = nowUtc,
             ExpiresAt = expiresAt,
@@ -53,10 +65,10 @@ public sealed class VerificationChallengeFactory : IVerificationChallengeFactory
 
         var payload = _protector.Protect(
             new OutboxPayload(1, accountId, token.TokenBase64Url, expiresAt, recipientEmail),
-            new OutboxAad(outboxId, 1, OutboxMessageTypes.EmailVerification, recipientEmail));
+            new OutboxAad(outboxId, 1, messageType, recipientEmail));
 
         var outbox = new EmailOutboxMessage(
-            outboxId, challengeId, OutboxMessageTypes.EmailVerification, recipientEmail, payload, nowUtc, nowUtc);
+            outboxId, challengeId, messageType, recipientEmail, payload, nowUtc, nowUtc);
 
         return new PreparedChallenge(challenge, outbox, token.TokenBase64Url, expiresAt);
     }

@@ -10,6 +10,7 @@ public sealed class AuthContractsSecurityTests
     [
         typeof(RegisterRequest), typeof(VerifyEmailRequest),
         typeof(ResendVerificationRequest), typeof(AcceptedResponse),
+        typeof(ForgotPasswordRequest), typeof(ResetPasswordRequest), typeof(DeleteAccountRequest),
     ];
 
     [Fact]
@@ -40,5 +41,20 @@ public sealed class AuthContractsSecurityTests
         var names = typeof(AcceptedResponse).GetProperties().Select(p => p.Name).ToArray();
         Assert.DoesNotContain(names, n => n.Contains("password", StringComparison.OrdinalIgnoreCase)
             || n.Contains("token", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void ForgotPasswordRequest_IsEmailOnly()
+    {
+        var names = typeof(ForgotPasswordRequest).GetProperties().Select(p => p.Name).ToArray();
+        Assert.Equal(["Email"], names);
+    }
+
+    [Fact]
+    public void DeleteAccountRequest_CarriesNoIdentity_OnlyPassword()
+    {
+        // The account to delete is always the authenticated caller's; the body must not be able to name another.
+        var names = typeof(DeleteAccountRequest).GetProperties().Select(p => p.Name).ToArray();
+        Assert.Equal(["Password"], names);
     }
 }

@@ -21,6 +21,15 @@ public sealed class AuthRateLimiters : IDisposable
     /// <summary>Envelope writes, partitioned by account id (an authenticated, server-issued identity — never client input).</summary>
     public BoundedRateLimiterCache SyncWritePerAccount { get; }
 
+    /// <summary>Forgot/reset-password, partitioned by trusted client IP.</summary>
+    public BoundedRateLimiterCache PasswordResetPerIp { get; }
+
+    /// <summary>Forgot-password, partitioned by SHA-256(normalized email) — the same key scheme as <see cref="LoginPerEmail"/>.</summary>
+    public BoundedRateLimiterCache PasswordResetPerEmail { get; }
+
+    /// <summary>Account deletion attempts, partitioned by the authenticated account id.</summary>
+    public BoundedRateLimiterCache AccountDeletePerAccount { get; }
+
     /// <summary>One process-wide token bucket shared across all IPs and all accounts/emails (no partition key).</summary>
     public TokenBucketRateLimiter GlobalLoginBudget { get; }
 
@@ -31,6 +40,9 @@ public sealed class AuthRateLimiters : IDisposable
         RefreshPerIp = new BoundedRateLimiterCache(options.RefreshPerIp, options.PartitionState.MaxIpPartitions, idle, clock);
         LoginPerEmail = new BoundedRateLimiterCache(options.LoginPerEmail, options.PartitionState.MaxEmailPartitions, idle, clock);
         SyncWritePerAccount = new BoundedRateLimiterCache(options.SyncWritePerAccount, options.PartitionState.MaxEmailPartitions, idle, clock);
+        PasswordResetPerIp = new BoundedRateLimiterCache(options.PasswordResetPerIp, options.PartitionState.MaxIpPartitions, idle, clock);
+        PasswordResetPerEmail = new BoundedRateLimiterCache(options.PasswordResetPerEmail, options.PartitionState.MaxEmailPartitions, idle, clock);
+        AccountDeletePerAccount = new BoundedRateLimiterCache(options.AccountDeletePerAccount, options.PartitionState.MaxEmailPartitions, idle, clock);
         GlobalLoginBudget = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
         {
             TokenLimit = options.GlobalLoginBudget.TokenLimit,
@@ -48,6 +60,9 @@ public sealed class AuthRateLimiters : IDisposable
         RefreshPerIp.Dispose();
         LoginPerEmail.Dispose();
         SyncWritePerAccount.Dispose();
+        PasswordResetPerIp.Dispose();
+        PasswordResetPerEmail.Dispose();
+        AccountDeletePerAccount.Dispose();
         GlobalLoginBudget.Dispose();
     }
 }
@@ -90,6 +105,10 @@ public static class AuthRateLimiting
     public static async ValueTask<object?> RefreshPerIpFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
         => await PerIpAsync(context, next, static r => r.RefreshPerIp);
 
+    /// <summary>Per-IP forgot/reset-password limit; same 503-on-unresolvable-IP behavior.</summary>
+    public static async ValueTask<object?> PasswordResetPerIpFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+        => await PerIpAsync(context, next, static r => r.PasswordResetPerIp);
+
     private static async ValueTask<object?> PerIpAsync(
         EndpointFilterInvocationContext context, EndpointFilterDelegate next, Func<AuthRateLimiters, BoundedRateLimiterCache> select)
     {
@@ -127,6 +146,14 @@ public static class AuthRateLimiting
     /// hardening is enabled, like the other limiters; an unexpected failure fails closed with 503.
     /// </summary>
     public static async ValueTask<object?> SyncWritePerAccountFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+        => await PerAccountAsync(context, next, static r => r.SyncWritePerAccount);
+
+    /// <summary>Per-account limit on password-confirmed account deletion attempts (same keying as the sync write limiter).</summary>
+    public static async ValueTask<object?> AccountDeletePerAccountFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+        => await PerAccountAsync(context, next, static r => r.AccountDeletePerAccount);
+
+    private static async ValueTask<object?> PerAccountAsync(
+        EndpointFilterInvocationContext context, EndpointFilterDelegate next, Func<AuthRateLimiters, BoundedRateLimiterCache> select)
     {
         var http = context.HttpContext;
         var options = http.RequestServices.GetRequiredService<PublicExposureHardeningOptions>();
@@ -141,7 +168,7 @@ public static class AuthRateLimiting
         }
 
         var limiters = http.RequestServices.GetRequiredService<AuthRateLimiters>();
-        if (!limiters.SyncWritePerAccount.TryAcquire(accountId.ToString("N"), out var lease))
+        if (!select(limiters).TryAcquire(accountId.ToString("N"), out var lease))
         {
             return ServiceUnavailable();
         }
@@ -159,6 +186,14 @@ public static class AuthRateLimiting
     /// email is never used or logged as the limiter key. Applies identically whether the account exists.
     /// </summary>
     public static async ValueTask<object?> LoginPerEmailFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+        => await PerEmailAsync(context, next, context.Arguments.OfType<LoginRequest>().FirstOrDefault()?.Email, static r => r.LoginPerEmail);
+
+    /// <summary>Per-normalized-email forgot-password limit (same hashed key scheme as the login limiter).</summary>
+    public static async ValueTask<object?> PasswordResetPerEmailFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+        => await PerEmailAsync(context, next, context.Arguments.OfType<ForgotPasswordRequest>().FirstOrDefault()?.Email, static r => r.PasswordResetPerEmail);
+
+    private static async ValueTask<object?> PerEmailAsync(
+        EndpointFilterInvocationContext context, EndpointFilterDelegate next, string? email, Func<AuthRateLimiters, BoundedRateLimiterCache> select)
     {
         var http = context.HttpContext;
         var options = http.RequestServices.GetRequiredService<PublicExposureHardeningOptions>();
@@ -167,19 +202,18 @@ public static class AuthRateLimiting
             return await next(context);
         }
 
-        var request = context.Arguments.OfType<LoginRequest>().FirstOrDefault();
-        // Invalid email syntax preserves the existing login contract (the per-IP + global limits cover it);
+        // Invalid email syntax preserves the endpoint's own contract (the per-IP limits cover it);
         // we do not fabricate a limiter key from malformed input.
-        if (request is null || !EmailAddressValidator.IsValid(request.Email))
+        if (email is null || !EmailAddressValidator.IsValid(email))
         {
             return await next(context);
         }
 
-        var normalized = EmailNormalizer.Normalize(request.Email);
+        var normalized = EmailNormalizer.Normalize(email);
         var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)));
 
         var limiters = http.RequestServices.GetRequiredService<AuthRateLimiters>();
-        if (!limiters.LoginPerEmail.TryAcquire(key, out var lease))
+        if (!select(limiters).TryAcquire(key, out var lease))
         {
             return ServiceUnavailable();
         }

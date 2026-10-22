@@ -22,6 +22,18 @@ public sealed class PublicExposureHardeningOptions
     /// <summary>Envelope uploads and deletes per account (phase 3). Each is a write of up to 16 MiB; a vault changes a few times a day.</summary>
     public TokenBucketPolicyOptions SyncWritePerAccount { get; set; } = new() { TokenLimit = 30, TokensPerPeriod = 10, ReplenishmentSeconds = 60 };
 
+    /// <summary>
+    /// Forgot-password and reset-password per trusted client IP (phase 6). Each forgot-password request may
+    /// queue an email; each reset-password attempt with a plausible token costs one Argon2 hash.
+    /// </summary>
+    public TokenBucketPolicyOptions PasswordResetPerIp { get; set; } = new() { TokenLimit = 5, TokensPerPeriod = 2, ReplenishmentSeconds = 60 };
+
+    /// <summary>Forgot-password per normalized email (phase 6): bounds mail-bombing of one address, identical for unknown addresses.</summary>
+    public TokenBucketPolicyOptions PasswordResetPerEmail { get; set; } = new() { TokenLimit = 3, TokensPerPeriod = 1, ReplenishmentSeconds = 300 };
+
+    /// <summary>Password-confirmed account deletion per account (phase 6): bounds password guessing through a stolen session.</summary>
+    public TokenBucketPolicyOptions AccountDeletePerAccount { get; set; } = new() { TokenLimit = 5, TokensPerPeriod = 1, ReplenishmentSeconds = 180 };
+
     public PartitionStateOptions PartitionState { get; set; } = new();
 
     /// <summary>Process-wide login admission budget (2D.2). Gated by <see cref="Enabled"/>.</summary>
@@ -37,6 +49,9 @@ public sealed class PublicExposureHardeningOptions
         LoginPerEmail.Validate($"{SectionName}:LoginPerEmail");
         RefreshPerIp.Validate($"{SectionName}:RefreshPerIp");
         SyncWritePerAccount.Validate($"{SectionName}:SyncWritePerAccount");
+        PasswordResetPerIp.Validate($"{SectionName}:PasswordResetPerIp");
+        PasswordResetPerEmail.Validate($"{SectionName}:PasswordResetPerEmail");
+        AccountDeletePerAccount.Validate($"{SectionName}:AccountDeletePerAccount");
         PartitionState.Validate($"{SectionName}:PartitionState");
         GlobalLoginBudget.Validate($"{SectionName}:GlobalLoginBudget");
         LoginJitter.Validate($"{SectionName}:LoginJitter");

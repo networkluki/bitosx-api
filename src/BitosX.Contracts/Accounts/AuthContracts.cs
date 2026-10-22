@@ -9,6 +9,18 @@ public sealed record VerifyEmailRequest(string Token, string Password);
 /// <summary>Request to re-issue a verification email for an unverified account.</summary>
 public sealed record ResendVerificationRequest(string Email);
 
+/// <summary>Password-reset request — email only. The response is identical whether or not an account exists.</summary>
+public sealed record ForgotPasswordRequest(string Email);
+
+/// <summary>Reset-password request — the emailed token and the new account password. No identity is accepted here.</summary>
+public sealed record ResetPasswordRequest(string Token, string Password);
+
+/// <summary>
+/// Delete-account request — the current account password as confirmation. The account to delete is the
+/// authenticated caller's own (from the validated JWT), never an id in the body.
+/// </summary>
+public sealed record DeleteAccountRequest(string Password);
+
 /// <summary>Generic response carrying no account state (anti-enumeration).</summary>
 public sealed record AcceptedResponse(string Message);
 

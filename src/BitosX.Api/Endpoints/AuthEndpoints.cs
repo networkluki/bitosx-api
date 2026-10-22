@@ -9,9 +9,9 @@ using BitosX.Contracts.Accounts;
 namespace BitosX.Api.Endpoints;
 
 /// <summary>
-/// Versioned account endpoints (<c>/v1/auth</c>). Responses are generic to resist
-/// account enumeration; validation errors use RFC7807 ProblemDetails. No response
-/// exposes password, token, verifier, or account state.
+/// Versioned account endpoints (<c>/v1/auth</c>): registration, email verification, password
+/// reset. Responses are generic to resist account enumeration; validation errors use RFC7807
+/// ProblemDetails. No response exposes password, token, verifier, or account state.
 /// </summary>
 public static class AuthEndpoints
 {
@@ -19,6 +19,9 @@ public static class AuthEndpoints
         "If the address can be registered or needs verification, check your email.";
 
     private const string EmailUnavailable = "Email verification is temporarily unavailable.";
+
+    private const string GenericResetAccepted =
+        "If an account exists for this address, check your email for a password-reset link.";
 
     /// <summary>Per-endpoint request-body cap for auth endpoints (§5.4), tighter than the global 64 KiB.</summary>
     private const long MaxAuthBodyBytes = 4 * 1024;
@@ -123,6 +126,55 @@ public static class AuthEndpoints
             await service.ResendAsync(new ResendCommand(request.Email), ct);
             return Results.Json(new AcceptedResponse(GenericAccepted), statusCode: StatusCodes.Status202Accepted);
         }).WithName("ResendVerification");
+
+        // Forgot-password: queues a reset email for a verified account; the response is identical for an
+        // unknown, unverified, disabled or eligible address (anti-enumeration). Email delivery disabled →
+        // generic 503 and nothing is created, like register/resend.
+        group.MapPost("/forgot-password", async (ForgotPasswordRequest request, AccountCapabilities capabilities, IPasswordResetService service, CancellationToken ct) =>
+        {
+            if (!capabilities.EmailDeliveryEnabled)
+            {
+                return EmailDeliveryUnavailable();
+            }
+
+            await service.RequestAsync(new ForgotPasswordCommand(request.Email), ct);
+            return Results.Json(new AcceptedResponse(GenericResetAccepted), statusCode: StatusCodes.Status202Accepted);
+        })
+        // Order: per-IP → 4 KiB body → per-normalized-email → service. Inert unless hardening is enabled.
+        .AddEndpointFilter(AuthRateLimiting.PasswordResetPerIpFilter)
+        .AddEndpointFilter(RejectOversizedBody)
+        .AddEndpointFilter(AuthRateLimiting.PasswordResetPerEmailFilter)
+        .WithName("ForgotPassword");
+
+        // Reset-password: consumes a reset token, replaces the account password and signs out every
+        // session. Stays available without SMTP so an already-issued link can be consumed (like verify-email).
+        group.MapPost("/reset-password", async (ResetPasswordRequest request, HttpContext http, IPasswordResetService service, CancellationToken ct) =>
+        {
+            ResetPasswordResult result;
+            try
+            {
+                result = await service.ResetAsync(new ResetPasswordCommand(request.Token, request.Password), ct);
+            }
+            catch (PasswordHashingCapacityExceededException)
+            {
+                return CapacityUnavailable(http); // Argon2 admission overload → 503, the token stays usable
+            }
+
+            return result switch
+            {
+                ResetPasswordResult.Reset => Results.Ok(
+                    new AcceptedResponse("Your password has been reset. Sign in again on every device.")),
+                ResetPasswordResult.InvalidPassword => Results.Problem(
+                    statusCode: StatusCodes.Status400BadRequest, title: "Invalid request",
+                    detail: $"Password must be between {AccountPasswordPolicy.MinLength} and {AccountPasswordPolicy.MaxLength} characters."),
+                _ => Results.Problem(
+                    statusCode: StatusCodes.Status400BadRequest, title: "Invalid request",
+                    detail: "Invalid or expired password-reset token."),
+            };
+        })
+        .AddEndpointFilter(AuthRateLimiting.PasswordResetPerIpFilter)
+        .AddEndpointFilter(RejectOversizedBody)
+        .WithName("ResetPassword");
 
         return app;
     }

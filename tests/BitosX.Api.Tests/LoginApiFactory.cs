@@ -85,6 +85,16 @@ public sealed class LoginApiFactory : WebApplicationFactory<Program>
         return (T)Convert.ChangeType(result!, typeof(T));
     }
 
+    public async Task ExecuteAsync(string sql, string paramName, object value)
+    {
+        await using var c = new MySqlConnection(_testDbConnectionString);
+        await c.OpenAsync();
+        await using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.AddWithValue(paramName, value);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     /// <summary>
     /// Registers + verifies an account through the real endpoints and returns its email. The password
     /// is set at verify time (email-first registration). Drives one dispatch to compose the email.

@@ -132,6 +132,17 @@ public sealed class HardenedAuthApiFactory : WebApplicationFactory<Program>
         await cmd.ExecuteNonQueryAsync();
     }
 
+    public async Task<T> QueryScalarAsync<T>(string sql, string paramName, object value)
+    {
+        await using var c = new MySqlConnection(_testDbConnectionString);
+        await c.OpenAsync();
+        await using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.AddWithValue(paramName, value);
+        var result = await cmd.ExecuteScalarAsync();
+        return (T)Convert.ChangeType(result!, typeof(T));
+    }
+
     /// <summary>Registers + verifies an account through the real endpoints (from a trusted loopback peer).</summary>
     public async Task<string> CreateVerifiedAccountAsync(string password)
     {

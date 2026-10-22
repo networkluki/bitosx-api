@@ -1,9 +1,19 @@
 namespace BitosX.Application.Verification;
 
+/// <summary>Purpose values stored in <c>email_verification_challenges.purpose</c>. A token is bound to exactly one.</summary>
+public static class ChallengePurposes
+{
+    /// <summary>Activates an unverified account and sets its first password.</summary>
+    public const string EmailVerification = "email_verification";
+
+    /// <summary>Replaces the password of a verified account and revokes all of its sessions.</summary>
+    public const string PasswordReset = "password_reset";
+}
+
 /// <summary>
-/// A single-use email verification challenge bound to an account.
+/// A single-use emailed challenge bound to an account and a purpose.
 ///
-/// The verification token is NEVER stored in plaintext: only a cryptographic
+/// The token is NEVER stored in plaintext: only a cryptographic
 /// hash (<see cref="TokenHash"/>) is persisted. All timestamps are UTC.
 /// </summary>
 public sealed record EmailVerificationChallenge
@@ -12,7 +22,10 @@ public sealed record EmailVerificationChallenge
 
     public Guid AccountId { get; init; }
 
-    /// <summary>Hash of the verification token (never the plaintext token).</summary>
+    /// <summary>What consuming the token does; see <see cref="ChallengePurposes"/>.</summary>
+    public string Purpose { get; init; } = ChallengePurposes.EmailVerification;
+
+    /// <summary>Hash of the token (never the plaintext token).</summary>
     public required byte[] TokenHash { get; init; }
 
     public DateTime CreatedAt { get; init; }

@@ -11,4 +11,7 @@ public sealed class EmailOptions
 
     /// <summary>Path of the verification page; the token is placed in the URL fragment.</summary>
     public string VerificationPath { get; set; } = "/verify-email";
+
+    /// <summary>Path of the password-reset page; the token is placed in the URL fragment.</summary>
+    public string PasswordResetPath { get; set; } = "/reset-password";
 }
