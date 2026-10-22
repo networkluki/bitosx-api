@@ -5,7 +5,10 @@ using Dapper;
 
 namespace BitosX.Infrastructure.Persistence;
 
-/// <summary>Dapper-backed <see cref="IEmailVerificationStore"/> over MariaDB.</summary>
+/// <summary>
+/// Dapper-backed <see cref="IEmailVerificationStore"/> over MariaDB. Every query is bound to
+/// <c>purpose = 'email_verification'</c>, so a password-reset token can never activate an account.
+/// </summary>
 public sealed class EmailVerificationStore : IEmailVerificationStore
 {
     private sealed record FinalizeRow(Guid Id, Guid AccountId, DateTime ExpiresAt);
@@ -32,6 +35,7 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
             FROM email_verification_challenges c
             JOIN accounts a ON a.id = c.account_id
             WHERE c.token_hash = @verifierHash
+              AND c.purpose = @purpose
               AND c.consumed_at IS NULL
               AND c.invalidated_at IS NULL
               AND c.expires_at > @nowUtc
@@ -41,7 +45,7 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
             """;
 
         return await connection.QuerySingleOrDefaultAsync<ActiveChallengeView>(
-            new CommandDefinition(sql, new { verifierHash, nowUtc }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            new CommandDefinition(sql, new { verifierHash, purpose = ChallengePurposes.EmailVerification, nowUtc }, cancellationToken: cancellationToken)).ConfigureAwait(false);
     }
 
     public async Task<VerificationOutcome> FinalizeVerificationAsync(
@@ -60,13 +64,14 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
                 FROM email_verification_challenges c
                 JOIN accounts a ON a.id = c.account_id
                 WHERE c.token_hash = @verifierHash
+                  AND c.purpose = @purpose
                   AND c.consumed_at IS NULL
                   AND c.invalidated_at IS NULL
                   AND a.email_verified_at IS NULL
                   AND a.password_hash IS NULL
                   AND a.disabled_at IS NULL
                 FOR UPDATE;
-                """, new { verifierHash }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+                """, new { verifierHash, purpose = ChallengePurposes.EmailVerification }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         if (row is null)
         {
@@ -138,12 +143,12 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
                        o.failed_at AS FailedAt, o.locked_until AS LockedUntil
                 FROM email_verification_challenges c
                 JOIN email_outbox o ON o.challenge_id = c.id
-                WHERE c.account_id = @accountId
+                WHERE c.account_id = @accountId AND c.purpose = @purpose
                   AND c.consumed_at IS NULL AND c.invalidated_at IS NULL AND c.expires_at > @nowUtc
                 ORDER BY c.created_at DESC
                 LIMIT 1
                 FOR UPDATE;
-                """, new { accountId, nowUtc }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+                """, new { accountId, purpose = ChallengePurposes.EmailVerification, nowUtc }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         if (active is not null)
         {
@@ -166,16 +171,11 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
             """
             UPDATE email_verification_challenges
             SET invalidated_at = @nowUtc
-            WHERE account_id = @accountId AND consumed_at IS NULL AND invalidated_at IS NULL;
-            """, new { accountId, nowUtc }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            WHERE account_id = @accountId AND purpose = @purpose AND consumed_at IS NULL AND invalidated_at IS NULL;
+            """, new { accountId, purpose = ChallengePurposes.EmailVerification, nowUtc }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         await connection.ExecuteAsync(new CommandDefinition(
-            """
-            INSERT INTO email_verification_challenges
-                (id, account_id, token_hash, created_at, expires_at, consumed_at, invalidated_at, attempt_count)
-            VALUES
-                (@Id, @AccountId, @TokenHash, @CreatedAt, @ExpiresAt, NULL, NULL, 0);
-            """, newChallenge, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            ChallengeInsert.Sql, newChallenge, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         await connection.ExecuteAsync(new CommandDefinition(
             OutboxInsert.Sql, OutboxInsert.Params(newOutbox), tx, cancellationToken: cancellationToken)).ConfigureAwait(false);

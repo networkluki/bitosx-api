@@ -94,3 +94,36 @@ internal sealed class FakeOutboxPayloadProtector : IOutboxPayloadProtector
     public bool TryUnprotect(ProtectedOutboxPayload p, OutboxAad aad, out OutboxPayload? payload)
     { payload = null; return false; }
 }
+
+internal sealed class FakePasswordResetStore : IPasswordResetStore
+{
+    public ActiveChallengeView? ActiveToReturn { get; set; }
+    public PasswordResetOutcome FinalizeOutcome { get; set; } = PasswordResetOutcome.Reset;
+    public PasswordResetIssueOutcome IssueOutcome { get; set; } = PasswordResetIssueOutcome.Issued;
+    public int FinalizeCalls { get; private set; }
+    public int IssueCalls { get; private set; }
+    public int FindCalls { get; private set; }
+    public EmailVerificationChallenge? LastIssuedChallenge { get; private set; }
+    public EmailOutboxMessage? LastIssuedOutbox { get; private set; }
+    public string? LastFinalizedPhc { get; private set; }
+
+    public Task<PasswordResetIssueOutcome> IssueChallengeAsync(Guid a, EmailVerificationChallenge c, EmailOutboxMessage o, DateTime now, TimeSpan min, CancellationToken ct = default)
+    { IssueCalls++; LastIssuedChallenge = c; LastIssuedOutbox = o; return Task.FromResult(IssueOutcome); }
+
+    public Task<ActiveChallengeView?> FindActiveChallengeByVerifierAsync(byte[] v, DateTime now, CancellationToken ct = default)
+    { FindCalls++; return Task.FromResult(ActiveToReturn); }
+
+    public Task<PasswordResetOutcome> FinalizeResetAsync(byte[] v, string phc, CancellationToken ct = default)
+    { FinalizeCalls++; LastFinalizedPhc = phc; return Task.FromResult(FinalizeOutcome); }
+}
+
+internal sealed class FakeAccountDeletionStore : IAccountDeletionStore
+{
+    public AccountDeleteOutcome Outcome { get; set; } = AccountDeleteOutcome.Deleted;
+    public int Calls { get; private set; }
+    public Guid LastAccountId { get; private set; }
+    public string? LastExpectedHash { get; private set; }
+
+    public Task<AccountDeleteOutcome> DeleteAccountAsync(Guid accountId, string expectedPasswordHash, CancellationToken ct = default)
+    { Calls++; LastAccountId = accountId; LastExpectedHash = expectedPasswordHash; return Task.FromResult(Outcome); }
+}

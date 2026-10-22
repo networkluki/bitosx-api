@@ -113,7 +113,22 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
 
         // (4) Compose + send.
         var expiresInMinutes = Math.Max(1, (int)Math.Ceiling((payload.ExpiresAtUtc - now).TotalMinutes));
-        var email = _composer.Compose(row.RecipientEmail, payload.TokenBase64Url, payload.ExpiresAtUtc, expiresInMinutes);
+        EmailMessage email;
+        switch (row.MessageType)
+        {
+            case OutboxMessageTypes.EmailVerification:
+                email = _composer.Compose(row.RecipientEmail, payload.TokenBase64Url, payload.ExpiresAtUtc, expiresInMinutes);
+                break;
+            case OutboxMessageTypes.PasswordReset:
+                email = _composer.ComposePasswordReset(row.RecipientEmail, payload.TokenBase64Url, payload.ExpiresAtUtc, expiresInMinutes);
+                break;
+            default:
+                // Unknown type: never guess a template (it would put the token in the wrong link). Fail closed.
+                _logger.LogWarning("Outbox message {OutboxId} has unknown message type; not sending.", row.Id);
+                await _store.MarkFailedAndErasePayloadAsync(row.Id, now, cancellationToken).ConfigureAwait(false);
+                return false;
+        }
+
         var result = await _sender.SendAsync(email, cancellationToken).ConfigureAwait(false);
 
         if (result == EmailSendResult.Sent)

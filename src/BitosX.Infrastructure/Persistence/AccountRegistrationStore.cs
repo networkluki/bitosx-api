@@ -43,12 +43,7 @@ public sealed class AccountRegistrationStore : IAccountRegistrationStore
         }
 
         await connection.ExecuteAsync(new CommandDefinition(
-            """
-            INSERT INTO email_verification_challenges
-                (id, account_id, token_hash, created_at, expires_at, consumed_at, invalidated_at, attempt_count)
-            VALUES
-                (@Id, @AccountId, @TokenHash, @CreatedAt, @ExpiresAt, NULL, NULL, 0);
-            """, challenge, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            ChallengeInsert.Sql, challenge, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         await connection.ExecuteAsync(new CommandDefinition(
             OutboxInsert.Sql, OutboxInsert.Params(outbox), tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
@@ -58,7 +53,19 @@ public sealed class AccountRegistrationStore : IAccountRegistrationStore
     }
 }
 
-/// <summary>Shared outbox INSERT used by the registration and verification stores.</summary>
+/// <summary>Shared challenge INSERT (verifier + purpose, never the token) used by every store that issues a challenge.</summary>
+internal static class ChallengeInsert
+{
+    public const string Sql =
+        """
+        INSERT INTO email_verification_challenges
+            (id, account_id, purpose, token_hash, created_at, expires_at, consumed_at, invalidated_at, attempt_count)
+        VALUES
+            (@Id, @AccountId, @Purpose, @TokenHash, @CreatedAt, @ExpiresAt, NULL, NULL, 0);
+        """;
+}
+
+/// <summary>Shared outbox INSERT used by the registration, verification and password-reset stores.</summary>
 internal static class OutboxInsert
 {
     public const string Sql =

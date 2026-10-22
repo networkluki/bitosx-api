@@ -26,9 +26,9 @@ See [`docs/API.md`](docs/API.md) for endpoint details and
 
 ## What is NOT implemented yet
 
-Password reset, SMS verification, CAPTCHA, web vault, and TOTP. (Registration with
-email verification, login/refresh/logout, sessions, and encrypted-envelope sync
-exist; see `docs/API.md`.)
+SMS verification, CAPTCHA, and TOTP. (Registration with email verification,
+login/refresh/logout, sessions, encrypted-envelope sync, password reset by emailed
+link, and password-confirmed account deletion exist; see `docs/API.md`.)
 
 ## Requirements
 

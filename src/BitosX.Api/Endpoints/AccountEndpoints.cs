@@ -1,5 +1,8 @@
 using System.Security.Claims;
+using BitosX.Api.Security;
 using BitosX.Application.Abstractions.Persistence;
+using BitosX.Application.Accounts;
+using BitosX.Application.Security;
 using BitosX.Application.Sessions;
 using BitosX.Contracts.Accounts;
 
@@ -16,6 +19,28 @@ public static class AccountEndpoints
 {
     private static IResult Unauthenticated() => Results.Problem(
         statusCode: StatusCodes.Status401Unauthorized, title: "Unauthorized", detail: "Authentication required.");
+
+    /// <summary>Per-endpoint request-body cap for the password-confirmed delete (same as the auth endpoints).</summary>
+    private const long MaxBodyBytes = 4 * 1024;
+
+    // One generic confirmation failure: wrong password and an account that cannot be deleted this way are
+    // indistinguishable. 403 (not 401) so a client does not mistake it for a dead session and sign out.
+    private static IResult PasswordConfirmationFailed() => Results.Problem(
+        statusCode: StatusCodes.Status403Forbidden, title: "Forbidden", detail: "Password confirmation failed.");
+
+    private static IResult PayloadTooLarge() => Results.Problem(
+        statusCode: StatusCodes.Status413PayloadTooLarge, title: "Payload too large", detail: "Request body exceeds the allowed size.");
+
+    private static IResult CapacityUnavailable(HttpContext http)
+    {
+        http.Response.Headers.RetryAfter = "1";
+        return Results.Problem(
+            statusCode: StatusCodes.Status503ServiceUnavailable, title: "Service unavailable",
+            detail: "Service temporarily unavailable. Try again later.");
+    }
+
+    private static async ValueTask<object?> RejectOversizedBody(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+        => context.HttpContext.Request.ContentLength is > MaxBodyBytes ? PayloadTooLarge() : await next(context);
 
     // Identical 404 for a nonexistent AND a non-owned session — never discloses existence/ownership.
     private static IResult SessionNotFound() => Results.Problem(
@@ -82,6 +107,33 @@ public static class AccountEndpoints
             var result = await sessions.DeleteSessionAsync(accountId, sessionId, id, ct);
             return result == DeleteSessionResult.Succeeded ? Results.NoContent() : SessionNotFound();
         }).WithName("DeleteSession");
+
+        // Permanent deletion of the caller's own account, confirmed with the account password. Removes the
+        // account and, by cascade, its sessions, refresh tokens, challenges, queued mail and the stored
+        // vault envelope. The password is verified with Argon2 outside any lock and re-checked (as the exact
+        // hash) under the account lock by the store. POST (not DELETE) because the confirmation is a body.
+        group.MapPost("/delete", async (DeleteAccountRequest request, HttpContext http, IAccountDeletionService service, CancellationToken ct) =>
+        {
+            if (!TryGetAuthenticatedIds(http.User, out var accountId, out _))
+            {
+                return Unauthenticated();
+            }
+
+            DeleteAccountResult result;
+            try
+            {
+                result = await service.DeleteAsync(new DeleteAccountCommand(accountId, request.Password), ct);
+            }
+            catch (PasswordHashingCapacityExceededException)
+            {
+                return CapacityUnavailable(http);
+            }
+
+            return result == DeleteAccountResult.Deleted ? Results.NoContent() : PasswordConfirmationFailed();
+        })
+        .AddEndpointFilter(AuthRateLimiting.AccountDeletePerAccountFilter)
+        .AddEndpointFilter(RejectOversizedBody)
+        .WithName("DeleteAccount");
 
         return app;
     }

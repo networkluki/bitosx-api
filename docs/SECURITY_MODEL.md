@@ -293,6 +293,44 @@ the first server feature that touches the vault at all, so the boundary is state
   the host (see `DEPLOYMENT.md`); below that an upload fails as a server error, never as a
   partial write.
 
+## Password reset and account deletion (phase 6)
+
+- **Reset = account password only.** `POST /v1/auth/forgot-password` → emailed link →
+  `POST /v1/auth/reset-password` replaces `accounts.password_hash`. The vault master password,
+  the vault key and the stored envelope are untouched and unrecoverable by this flow — the server
+  never had them. The reset email says so explicitly.
+- **Same machinery, bound by purpose.** Reset challenges live in `email_verification_challenges`
+  with `purpose = 'password_reset'` (migration 0004) and ride the same HMAC-SHA256 pepper verifier,
+  30-minute TTL, single use (`consumed_at` vs `invalidated_at`), encrypted outbox payload (AAD binds
+  `message_type = password_reset`) and dispatcher eligibility re-check as verification. **Every
+  verification query is bound to `purpose = 'email_verification'` and every reset query to
+  `purpose = 'password_reset'`**, so a token issued for one can never be consumed for the other
+  (tested at store and endpoint level). The dispatcher composes by `message_type` and fails closed
+  on an unknown type.
+- **Eligibility.** A reset challenge is issued, pre-checked and finalized only for an account with
+  `email_verified_at IS NOT NULL AND password_hash IS NOT NULL AND disabled_at IS NULL`. An
+  unverified account must finish verification instead (its password is set there); a disabled
+  account gets nothing. The email goes to the stored account address, never the typed one.
+- **Anti-enumeration.** forgot-password returns one generic 202 for unknown, unverified, disabled
+  and eligible addresses, and for a request skipped by the min re-issue interval or an in-flight
+  delivery. reset-password returns one generic 400 for every token failure.
+- **Two-phase finalize, sessions revoked atomically.** Policy check and verifier pre-check before
+  any Argon2; hashing outside any lock; then one `FOR UPDATE` transaction (authoritative time read
+  after the lock) that replaces the hash, consumes the token, invalidates the account's other
+  active reset challenges and revokes **every** session and refresh token in the canonical lock
+  order (accounts → sessions → refresh_tokens). No partial state: a failed re-check rolls back.
+- **Account deletion** (`POST /v1/account/delete`) is authenticated **and** password-confirmed; the
+  account id is the JWT `sub`, never body input. Argon2 verify runs outside any lock; the store
+  then locks the account row, re-checks the **exact PHC** it verified (a concurrent reset makes the
+  delete fail closed) and deletes the row, cascading to challenges, outbox rows, sessions, refresh
+  tokens and `vault_blobs`. A leased outbox row that disappears mid-delivery is simply not sent
+  (the dispatcher's fresh state read returns nothing). Wrong password → generic 403 (not 401).
+- **Rate limits** (hardened mode, same generic 429/503 contract): forgot/reset-password per trusted
+  client IP (5 burst / 2 per 60 s), forgot-password per `SHA-256(normalizedEmail)` (3 burst / 1 per
+  5 min), account deletion per account id (5 burst / 1 per 3 min). Hardening is now composed with
+  AccountCore (not Login) because these limiters ride on EmailVerification alone. Argon2 admission
+  applies as always.
+
 ## Rate limiting (Phase 2D public-exposure hardening)
 
 Configured under `Security:PublicExposureHardening` (a single validated model, fail-closed at
@@ -331,8 +369,8 @@ unrestricted auth.
 
 - **Bounded Argon2 work admission (ALWAYS active — independent of `Enabled`).** Password hashing is a
   resource-safety chokepoint, so the Argon2 gate is wired in `AddBitosxAccountCore` and applies to every
-  production Argon2 operation (login verify today; future registration / password-change / reset go through
-  the same hasher). Built on a BCL `ConcurrencyLimiter`: at most **2** operations execute, at most **4** wait
+  production Argon2 operation (login verify, email verification, password reset, account-deletion
+  confirmation; future password-change goes through the same hasher). Built on a BCL `ConcurrencyLimiter`: at most **2** operations execute, at most **4** wait
   (**oldest-first / FIFO**), a queued operation waits at most **2 s**, and a further operation is rejected
   immediately. Queue-full and acquire-timeout both surface as an Application-level
   `PasswordHashingCapacityExceededException` (never a password mismatch); genuine cancellation propagates and
@@ -369,6 +407,10 @@ process-wide budget → credential/Argon2 admission → jitter → 200/401.
 The Cloudflare→Apache→loopback-Kestrel trust boundary and its host-side enforcement (Kestrel loopback
 binding, firewall, Apache real-IP config, secrets injection) are documented, with an app-enforced vs
 deployment-enforced checklist and verification commands, in [`DEPLOYMENT.md`](DEPLOYMENT.md).
+
+**Implemented (phase 6):** `POST /v1/auth/forgot-password` per-IP + per-normalized-email,
+`POST /v1/auth/reset-password` per-IP (shared bucket), `POST /v1/account/delete` per-account — see
+"Password reset and account deletion".
 
 **Deferred:** adaptive Turnstile/CAPTCHA (separately approved later). Registration/verification limits
 (`/register`, `/resend-verification`, `/verify-email`) and a global outbound-email budget remain future

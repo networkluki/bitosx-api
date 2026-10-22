@@ -29,6 +29,30 @@ public sealed class CapabilityEndpointTests
     }
 
     [Fact]
+    public async Task ForgotPassword_WhenDeliveryDisabled_Returns503_AndCreatesNothing()
+    {
+        await using var factory = new CapabilityApiFactory(verification: true);
+        await factory.ResetDatabaseAsync();
+        var client = factory.CreateClient();
+
+        var resp = await client.PostAsJsonAsync("/v1/auth/forgot-password", new { email = Email() });
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, resp.StatusCode);
+        Assert.Equal("application/problem+json", resp.Content.Headers.ContentType?.MediaType);
+        Assert.Equal(0L, await factory.CountAsync("SELECT COUNT(*) FROM email_verification_challenges"));
+        Assert.Equal(0L, await factory.CountAsync("SELECT COUNT(*) FROM email_outbox"));
+    }
+
+    [Fact]
+    public async Task ResetPassword_WhenDeliveryDisabled_StaysMapped_BogusTokenReturns400()
+    {
+        // Like verify-email: an already-issued link must remain consumable without SMTP.
+        await using var factory = new CapabilityApiFactory(verification: true);
+        var resp = await factory.CreateClient().PostAsJsonAsync("/v1/auth/reset-password", new { token = "bogus-token", password = "a-valid-password-12" });
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    [Fact]
     public async Task Resend_WhenDeliveryDisabled_Returns503_AndCreatesNothing()
     {
         await using var factory = new CapabilityApiFactory(verification: true);
@@ -64,6 +88,8 @@ public sealed class CapabilityEndpointTests
         Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync("/v1/auth/register", new { email = Email() })).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync("/v1/auth/verify-email", new { token = "x", password = "a-valid-password-12" })).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync("/v1/auth/resend-verification", new { email = Email() })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync("/v1/auth/forgot-password", new { email = Email() })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync("/v1/auth/reset-password", new { token = "x", password = "a-valid-password-12" })).StatusCode);
         // Health still works.
         Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/health")).StatusCode);
     }

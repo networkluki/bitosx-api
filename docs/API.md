@@ -20,8 +20,10 @@ no credentials; a preflight (`OPTIONS` + `Access-Control-Request-Method`) is ans
 > (`/v1/auth/login`), **refresh** (`/v1/auth/refresh`), **logout**
 > (`/v1/auth/logout`), **logout-all** (`/v1/auth/logout-all`), and the protected
 > account endpoints **`/v1/account/me`**, **`/v1/account/sessions`**, and
-> **`DELETE /v1/account/sessions/{id}`**. **Encrypted-envelope sync** (`/v1/sync/*`) rides on Login. **Password reset
-> and phone/SMS do not exist yet.** Registration/verification are exposed when
+> **`DELETE /v1/account/sessions/{id}`**. **Encrypted-envelope sync** (`/v1/sync/*`) rides on Login.
+> **Password reset by emailed link** (`/v1/auth/forgot-password`, `/v1/auth/reset-password`) and
+> **password-confirmed account deletion** (`POST /v1/account/delete`) exist since phase 6.
+> **Phone/SMS does not exist yet.** Registration/verification/password reset are exposed when
 > EmailVerification is configured; **login/refresh/logout and the account
 > endpoints are exposed independently when the Login capability is enabled** (DB
 > connection + JWT signing key + kid), even without SMTP. The API otherwise stays
@@ -66,6 +68,44 @@ account existence/state. Rate limiting is a production blocker (see SECURITY_MOD
 Request: `{ "email": "user@example.com" }` → **202 Accepted** (generic message)
 
 No response ever contains a password, password hash, token, or token verifier.
+
+## `POST /v1/auth/forgot-password`
+
+Starts an **account-password reset** by email. Accepts only an email. For a verified, enabled
+account with a password it queues a reset email (to the address on the account, never the one
+typed) carrying a single-use link `https://vault.bitosx.se/reset-password#token=<base64url>`
+(token in the URL fragment, TTL 30 minutes). For an unknown, unverified or disabled address it
+does nothing. The response is **identical in every case**:
+
+Request: `{ "email": "user@example.com" }` → **202 Accepted**
+`{ "message": "If an account exists for this address, check your email for a password-reset link." }`
+
+- Malformed email → still the generic **202**. Malformed JSON → **400**; body over **4 KiB** → **413**.
+- A new request invalidates the previous reset link (min re-issue interval 60 s; a request within
+  it, or while the previous email is in flight, is silently skipped — still **202**).
+- Email delivery not configured → generic **503**, nothing created (like register/resend).
+- Under hardening: per-IP (5 burst / 2 per 60 s) and per-normalized-email (3 burst / 1 per 5 min)
+  limits → generic **429**; unresolvable trusted client IP → **503**.
+
+This resets only the **account** password used to sign in. It cannot recover or change the vault
+**master password**; the stored envelope stays ciphertext the server cannot read.
+
+## `POST /v1/auth/reset-password`
+
+Consumes a reset token and **replaces the account password**. In one transaction: the new
+Argon2id hash is stored, the token is consumed, any other outstanding reset link for the account
+is invalidated, and **every session and refresh token of the account is revoked** (all devices
+must sign in again). Stays available without SMTP so an already-issued link can be consumed.
+
+Request: `{ "token": "<base64url>", "password": "<12..128>" }` → **200 OK**
+`{ "message": "Your password has been reset. Sign in again on every device." }`
+
+- Invalid/expired/consumed/invalidated token, a verification token, or a token for an account
+  that can no longer sign in → **400** generic ProblemDetails
+  (`detail: "Invalid or expired password-reset token."`). No Argon2 runs for such a token.
+- Password outside 12–128 → **400** ProblemDetails (token not consumed).
+- Argon2 admission overload → **503** (`Retry-After: 1`); the token stays usable.
+- Body over **4 KiB** → **413**. Under hardening the forgot-password per-IP limit applies here too.
 
 ## `POST /v1/auth/login`
 
@@ -178,6 +218,25 @@ Ownership is determined server-side from the validated JWT identity. → **204 N
   the service. Missing/invalid token → **401**.
 - Deleting the caller's **current** session is allowed (effectively logout); the access
   token's session is then gone and subsequent authenticated calls return **401**.
+
+## `POST /v1/account/delete`
+
+**Authenticated.** Permanently deletes the **caller's own** account (from the validated JWT
+identity, never an id in the body), confirmed with the account password. Removes the account and,
+by cascade, its sessions, refresh tokens, verification/reset challenges, queued mail and the
+**stored vault envelope**. A local vault file on the user's device is not touched.
+
+Request: `{ "password": "<current account password>" }` → **204 No Content**.
+
+- Wrong password, empty password, or an account that cannot be deleted this way → one generic
+  **403** `application/problem+json` (`detail: "Password confirmation failed."`); nothing is
+  deleted and the session stays valid (403, not 401, so a client does not mistake it for a dead
+  session).
+- Missing/invalid bearer → **401**. Body over **4 KiB** → **413**. Extra body fields (e.g. an
+  `accountId`) are ignored.
+- Argon2 admission overload → **503** (`Retry-After: 1`).
+- Under hardening: per-account limit (5 burst / 1 per 3 min, keyed by the server-issued account
+  id) → generic **429**. After deletion the address can register again from scratch.
 
 ## Encrypted-envelope sync (`/v1/sync`)
 
