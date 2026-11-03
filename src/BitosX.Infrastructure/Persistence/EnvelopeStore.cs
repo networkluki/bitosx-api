@@ -88,7 +88,7 @@ public sealed class EnvelopeStore : IEnvelopeStore
             "SELECT revision AS Revision, (envelope IS NOT NULL) AS HasEnvelope FROM vault_blobs WHERE account_id = @AccountId FOR UPDATE;",
             new { AccountId = accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
-        var now = _clock.GetUtcNow().UtcDateTime;
+        var now = StoredPrecision(_clock.GetUtcNow().UtcDateTime);
         // What the client compares against: the stored revision, or 0 when nothing is stored (no row,
         // or a tombstone left by a delete).
         var currentRevision = current is { HasEnvelope: true } ? current.Revision : 0;
@@ -135,12 +135,21 @@ public sealed class EnvelopeStore : IEnvelopeStore
     }
 
     /// <summary>
+    /// The value as <c>DATETIME(6)</c> keeps it: whole microseconds. A clock reading has 100 ns ticks, and the
+    /// server truncates (MariaDB) or rounds (MySQL) the rest on write, so the upload's answer would differ
+    /// from what every later read returns. Truncating here makes the written value, the answer and the reads
+    /// the same on both.
+    /// </summary>
+    private static DateTime StoredPrecision(DateTime utc) =>
+        new(utc.Ticks - (utc.Ticks % TimeSpan.TicksPerMicrosecond), DateTimeKind.Utc);
+
+    /// <summary>
     /// Clears the stored envelope and keeps the row as a tombstone that remembers the last revision, so
     /// revisions never restart. Idempotent: returns whether an envelope was there.
     /// </summary>
     public async Task<bool> DeleteAsync(Guid accountId, CancellationToken cancellationToken = default)
     {
-        var now = _clock.GetUtcNow().UtcDateTime;
+        var now = StoredPrecision(_clock.GetUtcNow().UtcDateTime);
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         var rows = await connection.ExecuteAsync(new CommandDefinition(
             """
