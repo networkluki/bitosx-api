@@ -26,6 +26,9 @@ public static class SyncEndpoints
 
     private static string Hex(byte[] fingerprint) => Convert.ToHexStringLower(fingerprint);
 
+    /// <summary>Envelope writes (upload, delete) share one per-account bucket.</summary>
+    private static readonly PerAccountRateLimitMetadata SyncWriteLimit = new(static r => r.SyncWritePerAccount);
+
     public static IEndpointRouteBuilder MapSyncEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/v1/sync").WithTags("Sync").RequireAuthorization();
@@ -102,7 +105,8 @@ public static class SyncEndpoints
                 _ => Unauthenticated(), // the account is gone: fail closed like any other dead session
             };
         })
-        .AddEndpointFilter(AuthRateLimiting.SyncWritePerAccountFilter)
+        // The per-account write limit runs in PerAccountRateLimitMiddleware, BEFORE the (up to ~22 MB) body is read.
+        .WithMetadata(SyncWriteLimit)
         .WithMetadata(new MaxRequestBodySizeMetadata(MaxRequestBodySizeMetadata.FromSync))
         .WithName("SyncUpload");
 
@@ -116,7 +120,7 @@ public static class SyncEndpoints
             await sync.DeleteAsync(accountId, ct);
             return Results.NoContent(); // idempotent: deleting nothing is still "nothing stored"
         })
-        .AddEndpointFilter(AuthRateLimiting.SyncWritePerAccountFilter)
+        .WithMetadata(SyncWriteLimit)
         .WithName("SyncDelete");
 
         return app;

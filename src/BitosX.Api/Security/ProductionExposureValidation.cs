@@ -20,15 +20,16 @@ public static class ProductionExposureValidation
             return; // Development/Test may run with hardening disabled and any local listener.
         }
 
-        // (1) Public-exposure hardening must be ON when the Login capability is enabled in Production.
-        if (capabilities.LoginEnabled)
+        // (1) Public-exposure hardening must be ON in Production when the Login capability OR the EmailVerification
+        // capability is enabled: forgot/reset-password (and its rate limiters) ride on EmailVerification alone.
+        if (capabilities.LoginEnabled || capabilities.EmailVerificationEnabled)
         {
             var hardeningEnabled = configuration.GetValue<bool>($"{PublicExposureHardeningOptions.SectionName}:Enabled");
             if (!hardeningEnabled)
             {
                 throw new InvalidOperationException(
-                    "Production with the Login capability requires Security:PublicExposureHardening:Enabled = true " +
-                    "(bounded Argon2 work is always active, but the per-IP/per-email/global rate limits and jitter must be enabled before public exposure).");
+                    "Production with the Login or EmailVerification capability requires Security:PublicExposureHardening:Enabled = true " +
+                    "(bounded Argon2 work is always active, but the per-IP/per-email/per-account/global rate limits and jitter must be enabled before public exposure).");
             }
         }
 

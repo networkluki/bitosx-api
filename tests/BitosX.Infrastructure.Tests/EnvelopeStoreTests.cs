@@ -148,7 +148,7 @@ public sealed class EnvelopeStoreTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Delete_RemovesTheRow_AndIsIdempotent()
+    public async Task Delete_ClearsTheEnvelope_AndIsIdempotent()
     {
         var account = await NewAccountAsync();
         var envelope = Bytes("{\"version\":1}");
@@ -157,11 +157,73 @@ public sealed class EnvelopeStoreTests : IAsyncLifetime
         Assert.True(await _store.DeleteAsync(account));
         Assert.False(await _store.DeleteAsync(account));
         Assert.Null(await _store.GetAsync(account, includeEnvelope: false));
+        Assert.Null(await _store.GetAsync(account, includeEnvelope: true));
 
-        // After a delete the next upload starts from zero again.
+        // Nothing is stored, so the next upload names base revision 0 — and continues the numbering.
         var again = await _store.UpsertAsync(account, 0, envelope, SHA256.HashData(envelope));
         Assert.Equal(EnvelopeUpsertOutcome.Stored, again.Outcome);
-        Assert.Equal(1, again.Revision);
+        Assert.Equal(2, again.Revision);
+    }
+
+    [Fact]
+    public async Task RevisionsNeverRestart_AfterADelete_AndAStaleDeviceConflicts()
+    {
+        var account = await NewAccountAsync();
+        var a = Bytes("{\"version\":1,\"ciphertext\":\"AAAA\"}");
+        var b = Bytes("{\"version\":1,\"ciphertext\":\"BBBB\"}");
+        await _store.UpsertAsync(account, 0, a, SHA256.HashData(a)); // 1 (device B last saw this)
+        await _store.UpsertAsync(account, 1, a, SHA256.HashData(a)); // 2
+        await _store.UpsertAsync(account, 2, a, SHA256.HashData(a)); // 3
+        Assert.True(await _store.DeleteAsync(account));
+
+        // While nothing is stored, only base 0 is accepted; a stale base sees current revision 0.
+        var stale = await _store.UpsertAsync(account, 3, b, SHA256.HashData(b));
+        Assert.Equal(EnvelopeUpsertOutcome.Conflict, stale.Outcome);
+        Assert.Equal(0, stale.Revision);
+
+        var relaunch = await _store.UpsertAsync(account, 0, b, SHA256.HashData(b));
+        Assert.Equal(4, relaunch.Revision);
+
+        // Device B still remembers revision 1: the new lineage never reuses it, so B conflicts.
+        var deviceB = await _store.UpsertAsync(account, 1, a, SHA256.HashData(a));
+        Assert.Equal(EnvelopeUpsertOutcome.Conflict, deviceB.Outcome);
+        Assert.Equal(4, deviceB.Revision);
+        var status = await _store.GetAsync(account, includeEnvelope: false);
+        Assert.Equal(4, status!.Revision);
+        Assert.Equal(SHA256.HashData(b), status.Fingerprint);
+    }
+
+    [Fact]
+    public async Task ReadTimestamps_AreUtc()
+    {
+        var account = await NewAccountAsync();
+        var envelope = Bytes("{\"version\":1}");
+        await _store.UpsertAsync(account, 0, envelope, SHA256.HashData(envelope));
+
+        var stored = await _store.GetAsync(account, includeEnvelope: false);
+        Assert.Equal(DateTimeKind.Utc, stored!.UpdatedAt.Kind);
+        Assert.Equal(DateTimeKind.Utc, stored.CreatedAt.Kind);
+        Assert.Equal(_clock.GetUtcNow().UtcDateTime, stored.UpdatedAt);
+    }
+
+    [Fact]
+    public async Task AnEnvelopeOfExactly16MiB_RoundTrips()
+    {
+        var account = await NewAccountAsync();
+        const int size = 16 * 1024 * 1024; // the API limit, one byte more than MEDIUMBLOB holds
+        var prefix = Bytes("{\"version\":1,\"ciphertext\":\"");
+        var suffix = Bytes("\"}");
+        var envelope = new byte[size];
+        prefix.CopyTo(envelope, 0);
+        envelope.AsSpan(prefix.Length, size - prefix.Length - suffix.Length).Fill((byte)'x');
+        suffix.CopyTo(envelope, size - suffix.Length);
+
+        var result = await _store.UpsertAsync(account, 0, envelope, SHA256.HashData(envelope));
+
+        Assert.Equal(EnvelopeUpsertOutcome.Stored, result.Outcome);
+        var stored = await _store.GetAsync(account, includeEnvelope: true);
+        Assert.Equal(size, stored!.SizeBytes);
+        Assert.Equal(SHA256.HashData(envelope), SHA256.HashData(stored.Envelope!));
     }
 
     [Fact]
@@ -221,4 +283,19 @@ public sealed class Migration0003Tests
     [Fact]
     public async Task VaultBlobsTable_Exists()
         => Assert.True(await _fixture.TableExistsAsync("vault_blobs"));
+
+    [Fact]
+    public async Task Migration0006_MakesTheEnvelopeANullableLongBlob()
+    {
+        Assert.Contains("0006_vault_revision_tombstone_longblob.sql", await _fixture.GetRecordedMigrationsAsync());
+        await using var connection = await _fixture.ConnectionFactory.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT DATA_TYPE, IS_NULLABLE FROM information_schema.columns " +
+            "WHERE table_schema = DATABASE() AND table_name = 'vault_blobs' AND column_name = 'envelope';";
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("longblob", reader.GetString(0), ignoreCase: true);
+        Assert.Equal("YES", reader.GetString(1));
+    }
 }

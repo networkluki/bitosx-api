@@ -15,6 +15,9 @@ internal sealed class FakeAccountRepository : IAccountRepository
 
     public void Seed(Account a) { _byNormalized[a.NormalizedEmail] = a; _byId[a.Id] = a; }
 
+    /// <summary>Simulates a lookup that a loose database collation resolves to a row with a different normalized email.</summary>
+    public void SeedUnderKey(string lookupKey, Account a) { _byNormalized[lookupKey] = a; _byId[a.Id] = a; }
+
     public int GetByNormalizedEmailCalls { get; private set; }
     public string? LastNormalizedEmailQueried { get; private set; }
     public List<string>? Trace { get; set; }
@@ -126,4 +129,31 @@ internal sealed class FakeAccountDeletionStore : IAccountDeletionStore
 
     public Task<AccountDeleteOutcome> DeleteAccountAsync(Guid accountId, string expectedPasswordHash, CancellationToken ct = default)
     { Calls++; LastAccountId = accountId; LastExpectedHash = expectedPasswordHash; return Task.FromResult(Outcome); }
+}
+
+internal sealed class FakeSecondFactor : BitosX.Application.Mfa.ISecondFactorConfirmation
+{
+    public BitosX.Application.Mfa.SecondFactorCheck Result { get; set; } = BitosX.Application.Mfa.SecondFactorCheck.NotRequired;
+    public int Calls { get; private set; }
+    public string? LastCode { get; private set; }
+    public List<string>? Trace { get; set; }
+
+    public Task<BitosX.Application.Mfa.SecondFactorCheck> CheckAsync(Guid accountId, string? code, CancellationToken ct = default)
+    { Calls++; LastCode = code; Trace?.Add("code"); return Task.FromResult(Result); }
+}
+
+internal sealed class FakeAccountPasswordStore : IAccountPasswordStore
+{
+    public PasswordChangeOutcome Outcome { get; set; } = PasswordChangeOutcome.Changed;
+    public int Calls { get; private set; }
+    public Guid LastAccountId { get; private set; }
+    public Guid LastKeepSessionId { get; private set; }
+    public string? LastExpectedHash { get; private set; }
+    public string? LastNewHash { get; private set; }
+
+    public Task<PasswordChangeOutcome> ChangePasswordAsync(Guid accountId, Guid keepSessionId, string expectedPasswordHash, string newPasswordHash, CancellationToken ct = default)
+    {
+        Calls++; LastAccountId = accountId; LastKeepSessionId = keepSessionId; LastExpectedHash = expectedPasswordHash; LastNewHash = newPasswordHash;
+        return Task.FromResult(Outcome);
+    }
 }

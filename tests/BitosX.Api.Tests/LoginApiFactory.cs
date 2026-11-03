@@ -29,6 +29,9 @@ public sealed class LoginApiFactory : WebApplicationFactory<Program>
     /// <summary>When false the Totp capability is off (no Security:TotpKey): used to prove fail-closed behavior.</summary>
     public bool TotpCapability { get; init; } = true;
 
+    /// <summary>Overrides the Kestrel endpoint from appsettings.json (for tests that run on a real Kestrel listener).</summary>
+    public string? KestrelListenerUrl { get; init; }
+
     public LoginApiFactory()
     {
         var cfg = new ConfigurationBuilder().AddUserSecrets("bitosx-infrastructure-tests").Build();
@@ -62,6 +65,10 @@ public sealed class LoginApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("Email:SmtpAppPassword", "test-app-password");
         builder.UseSetting("Email:FromAddress", "bitosx@example.com");
         builder.UseSetting("Email:PublicBaseUrl", "https://vault.bitosx.se");
+        if (KestrelListenerUrl is not null)
+        {
+            builder.UseSetting("Kestrel:Endpoints:Http:Url", KestrelListenerUrl);
+        }
 
         builder.ConfigureTestServices(services =>
         {

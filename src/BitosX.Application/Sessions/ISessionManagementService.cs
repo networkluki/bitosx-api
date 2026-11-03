@@ -9,6 +9,13 @@ namespace BitosX.Application.Sessions;
 /// </summary>
 public sealed record SessionListItem(Guid Id, DateTime CreatedAt, DateTime LastSeenAt, DateTime ExpiresAt, bool Current);
 
+/// <summary>Bounds of the session list (shared contract with the web and desktop clients).</summary>
+public static class SessionListLimits
+{
+    /// <summary>The list returns at most this many sessions, newest first; clients size their reads for it.</summary>
+    public const int MaxListedSessions = 200;
+}
+
 /// <summary>Coarse delete outcome — <see cref="NotFound"/> hides ownership (never reveals another account's session).</summary>
 public enum DeleteSessionResult
 {

@@ -16,10 +16,18 @@ public sealed record ForgotPasswordRequest(string Email);
 public sealed record ResetPasswordRequest(string Token, string Password);
 
 /// <summary>
-/// Delete-account request — the current account password as confirmation. The account to delete is the
-/// authenticated caller's own (from the validated JWT), never an id in the body.
+/// Delete-account request — the current account password as confirmation, plus a TOTP or recovery code
+/// (<see cref="Code"/>) when the account has TOTP confirmed. The account to delete is the authenticated
+/// caller's own (from the validated JWT), never an id in the body.
 /// </summary>
-public sealed record DeleteAccountRequest(string Password);
+public sealed record DeleteAccountRequest(string Password, string? Code = null);
+
+/// <summary>
+/// Change-password request (<c>POST /v1/account/password</c>) — the current account password, the new one
+/// (12–128 characters, used exactly as typed), and a TOTP or recovery code (<see cref="Code"/>) when the account
+/// has TOTP confirmed. The account is the authenticated caller's own. The vault master password is not affected.
+/// </summary>
+public sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword, string? Code = null);
 
 /// <summary>Generic response carrying no account state (anti-enumeration).</summary>
 public sealed record AcceptedResponse(string Message);

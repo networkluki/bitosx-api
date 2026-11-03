@@ -4,10 +4,12 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using BitosX.Api.Auth;
 using BitosX.Api.Endpoints;
+using BitosX.Api.Hosting;
 using BitosX.Api.Http;
 using BitosX.Api.Security;
 using BitosX.Application.Versioning;
 using BitosX.Infrastructure.Accounts;
+using BitosX.Infrastructure.Housekeeping;
 using BitosX.Infrastructure.Persistence;
 using BitosX.Infrastructure.Security;
 using BitosX.Infrastructure.Sync;
@@ -15,6 +17,13 @@ using BitosX.Infrastructure.Versioning;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Logging;
+
+// `dotnet BitosX.Api.dll migrate`: apply pending schema migrations with ConnectionStrings:BitosxMigrator and
+// exit. The web host below is never built or started in that mode.
+if (MigrateCommand.IsRequested(args))
+{
+    return await MigrateCommand.RunAsync(args, Console.Out, Console.Error);
+}
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -60,22 +69,34 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 });
 
 // ---- Kestrel: conservative request-body-size limit ----
-// No current endpoint accepts a body; future endpoints can raise this locally.
+// Every endpoint keeps this cap except the envelope upload, which MaxRequestBodySizeMiddleware raises per
+// endpoint (from VaultSyncOptions); the auth/account endpoints additionally refuse a declared body over 4 KiB.
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.Limits.MaxRequestBodySize = 64 * 1024; // 64 KB
     options.AddServerHeader = false;
 });
 
-// ---- CORS for the browser client(s): the web account app at https://vault.bitosx.se ----
-// Bound + validated fail-closed at startup (exact https origins only, no credentials).
-// With an empty Security:Cors:AllowedOrigins list, no CORS middleware is registered and no
-// CORS header is emitted, exactly as before. See BrowserCorsOptions for the policy and its rationale.
+// ---- CORS for the browser client(s): the web account app at https://vault.bitosx.se, and the product
+// page at https://bitosx.se for GET /health and GET /version only ----
+// Bound + validated fail-closed at startup (exact https origins only, no credentials). With both
+// Security:Cors:AllowedOrigins and Security:Cors:StatusPageOrigins empty, no CORS middleware is registered
+// and no CORS header is emitted. See BrowserCorsOptions for the policies and their rationale.
 var corsOptions = BrowserCorsOptions.Bind(builder.Configuration);
 builder.Services.AddSingleton(corsOptions);
-if (corsOptions.Enabled)
+if (corsOptions.AnyEnabled)
 {
-    builder.Services.AddCors(options => options.AddPolicy(BrowserCorsOptions.PolicyName, corsOptions.BuildPolicy()));
+    builder.Services.AddCors(options =>
+    {
+        if (corsOptions.Enabled)
+        {
+            // The browser-client policy is the default: every endpoint without its own CORS metadata uses it.
+            options.AddPolicy(BrowserCorsOptions.PolicyName, corsOptions.BuildPolicy());
+            options.DefaultPolicyName = BrowserCorsOptions.PolicyName;
+        }
+
+        options.AddPolicy(BrowserCorsOptions.StatusPolicyName, corsOptions.BuildStatusPolicy());
+    });
 }
 
 // ---- Composition root ----
@@ -84,8 +105,7 @@ builder.Services.AddSingleton<IProductVersionProvider>(
     _ => new AssemblyProductVersionProvider(Assembly.GetExecutingAssembly()));
 
 // Persistence is wired only when a connection string is configured (from a
-// local secret store, never committed). It stays absent for the loopback
-// health/version foundation, and no auth/account behavior is exposed yet.
+// local secret store, never committed); without it only /health and /version exist.
 // Capability-based composition (detected once). AccountCore is independent of SMTP;
 // EmailVerification adds register/verify/resend + outbox; EmailDelivery adds the SMTP
 // sender + dispatcher. A missing optional capability disables only itself.
@@ -99,9 +119,13 @@ ProductionExposureValidation.Validate(builder.Environment, builder.Configuration
 
 if (capabilities.AccountCoreEnabled)
 {
-    var bitosxMigratorConnectionString = builder.Configuration.GetConnectionString("BitosxMigrator");
-    builder.Services.AddBitosxPersistence(bitosxConnectionString!, bitosxMigratorConnectionString);
+    // The web host runs with the DML-only runtime account; schema changes are applied out of band by the
+    // `migrate` command with the separate migrator account, which the web host never reads.
+    builder.Services.AddBitosxPersistence(bitosxConnectionString!);
     builder.Services.AddBitosxAccountCore(builder.Configuration);
+
+    // Background pruning of dead challenges and sessions after a retention window (Housekeeping:*, validated).
+    builder.Services.AddBitosxHousekeeping(builder.Configuration, bitosxConnectionString!);
 
     // Phase 2D.1: bind + validate public-exposure hardening (fail-closed) and register the auth rate
     // limiters. Inert unless Security:PublicExposureHardening:Enabled is true. Composed with AccountCore
@@ -110,7 +134,9 @@ if (capabilities.AccountCoreEnabled)
 
     if (capabilities.EmailVerificationEnabled)
     {
-        builder.Services.AddBitosxEmailVerification(builder.Configuration, bitosxConnectionString!);
+        // Email:PublicBaseUrl must be https (fail closed); a loopback http URL is accepted only in Development/Testing.
+        var allowLoopbackHttpBaseUrl = builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing");
+        builder.Services.AddBitosxEmailVerification(builder.Configuration, bitosxConnectionString!, allowLoopbackHttpBaseUrl);
     }
 
     // EmailDelivery (SMTP sender + background dispatcher) is registered ONLY when SMTP
@@ -167,9 +193,11 @@ app.UseMiddleware<CorrelationIdMiddleware>();
 // CORS runs before authentication so a browser preflight (OPTIONS, no credentials) is answered
 // without ever reaching an endpoint, its rate limiter or the JWT handler. Registered only when an
 // origin is configured; a disallowed Origin simply gets no CORS headers and the browser blocks the read.
-if (corsOptions.Enabled)
+// The default policy (browser clients) applies to every endpoint; /health and /version carry the
+// status policy as endpoint metadata.
+if (corsOptions.AnyEnabled)
 {
-    app.UseCors(BrowserCorsOptions.PolicyName);
+    app.UseCors();
 }
 
 // Per-endpoint request-body limit (the envelope upload needs more than Kestrel's 64 KB default).
@@ -181,6 +209,10 @@ if (capabilities.LoginEnabled)
 {
     app.UseAuthentication();
     app.UseAuthorization();
+
+    // Per-account limiters that must run before the endpoint reads its body (the envelope upload): after
+    // authorization (the account id is the validated JWT's sub), before endpoint execution.
+    app.UseMiddleware<PerAccountRateLimitMiddleware>();
 }
 
 // OpenAPI document is mapped ONLY in Development (see AddOpenApi gating above). In Production the route
@@ -190,11 +222,8 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-// Unversioned infrastructure endpoints (/health, /version).
-app.MapInfrastructureEndpoints();
-
-// Future versioned business API surface (currently empty).
-app.MapApiV1();
+// Unversioned infrastructure endpoints (/health, /version), readable cross-origin by the status page.
+app.MapInfrastructureEndpoints(corsOptions.StatusPolicyEnabled ? BrowserCorsOptions.StatusPolicyName : null);
 
 // Auth endpoints are exposed when EmailVerification is available. register/resend/forgot-password
 // return a generic 503 when EmailDelivery is unavailable (routes stay mapped); verify-email and
@@ -228,6 +257,7 @@ foreach (var mapEndpoints in app.Services.GetServices<Action<IEndpointRouteBuild
 }
 
 app.Run();
+return 0;
 
 // Exposed so the integration test project can bootstrap the app with
 // WebApplicationFactory<Program>.

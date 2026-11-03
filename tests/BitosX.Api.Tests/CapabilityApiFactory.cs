@@ -40,6 +40,7 @@ public sealed class CapabilityApiFactory : WebApplicationFactory<Program>
             builder.UseSetting("Security:EmailOutboxKey", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
         }
         // Deliberately NO Email:SmtpUsername / Email:SmtpAppPassword → EmailDelivery disabled.
+        builder.UseSetting("Housekeeping:Enabled", "false"); // no background pruning against the shared test DB
     }
 
     public async Task ResetDatabaseAsync()

@@ -74,10 +74,11 @@ identifier and does not log headers or bodies.
 - Forwarded headers are trusted from **loopback proxies only** (`127.0.0.1`,
   `::1`) with `ForwardLimit = 1`. Arbitrary-network forwarded headers are never
   trusted.
-- CORS exists for exactly one consumer: the browser-based web account app at
-  `https://vault.bitosx.se` (its source lives in `networkluki/bitosx-manager`).
-  See "Browser clients (CORS)" below. The Avalonia desktop client is not a
-  browser and is unaffected.
+- CORS exists for two consumers: the browser-based web account app at
+  `https://vault.bitosx.se` (its source lives in `networkluki/bitosx-manager`), and
+  the product page `https://bitosx.se`, which may read only `GET /health` and
+  `GET /version` (its live status badge). See "Browser clients (CORS)" below. The
+  Avalonia desktop client is not a browser and is unaffected.
 - A conservative request-body-size limit (64 KB) is applied at Kestrel; the
   server header is suppressed.
 
@@ -94,9 +95,14 @@ opts in through CORS. The policy (`BrowserCorsOptions`, configured under
   uppercase: anything but `https://host[:port]` in canonical form refuses startup. A
   browser's `Origin` header must match byte for byte; `vault.bitosx.se.attacker.example`
   or a different port gets no CORS headers.
-- **Inert when empty.** With no origin configured the CORS middleware is not registered
-  and no CORS header is ever emitted — the pre-CORS behaviour.
-- **Methods** `GET`, `POST`, `DELETE`; **request headers** `Authorization`,
+- **Inert when empty.** With no origin configured (neither list) the CORS middleware is not
+  registered and no CORS header is ever emitted — the pre-CORS behaviour.
+- **Two policies.** The browser-client policy (the `AllowedOrigins`) is the default for every
+  endpoint. A second, narrower policy applies to `GET /health` and `GET /version` only: the
+  `AllowedOrigins` plus `Security:Cors:StatusPageOrigins` (repository default
+  `https://bitosx.se`, same validation), method `GET` only. A status-page origin therefore gets no
+  CORS header from any other endpoint.
+- **Methods** `GET`, `POST`, `PUT`, `DELETE` (`PUT` is the envelope upload); **request headers** `Authorization`,
   `Content-Type`, `Accept`; **exposed response headers** `Retry-After`,
   `X-Correlation-ID`; preflight cache `Security:Cors:PreflightMaxAgeSeconds`
   (default 600, max 86400). None of these lists is configurable: widening them is a
@@ -115,16 +121,12 @@ change the zero-knowledge boundary, the generic-error model, rate limiting or to
 validation, and it must not be mistaken for a defence against non-browser clients, which
 never honoured it.
 
-## Public-exposure restrictions
+## Public-exposure posture
 
-`api.bitosx.se` resolves to this host in Cloudflare DNS, but the API must
-**not** be exposed publicly during this phase:
-
-- Apache does not proxy to Kestrel.
-- No Let's Encrypt certificate is requested for `api.bitosx.se` by this work.
-- No Cloudflare configuration is changed.
-- OpenAPI is currently served on loopback; it must be gated/reviewed before any
-  public exposure.
+The production path is Cloudflare → Apache → loopback Kestrel (`api.bitosx.se`). What the
+application enforces itself (hardening gate, loopback listener, OpenAPI Development-only, CORS)
+and what must be verified on the host is listed in [`DEPLOYMENT.md`](DEPLOYMENT.md); none of the
+**[host]** items there can be taken for granted from this repository.
 
 ## Database security (Persistence Foundation)
 
@@ -155,9 +157,11 @@ never honoured it.
   verify, receive a password, nor be sent resend emails.
 - **Account password:** Argon2id (`Konscious`), self-describing PHC storage, `p=1`.
   **Locked parameters (benchmarked on `bitosx-prod`, 1 vCPU / ~1 GiB):**
-  `m = 19456 KiB (19 MiB), t = 3, p = 1, maxConcurrency = 1` (hard budget
-  `memoryKiB × maxConcurrency ≤ 192 MiB`). Benchmark evidence (`tools/BitosX.Benchmarks`,
-  Release):
+  `m = 19456 KiB (19 MiB), t = 3, p = 1` (hard budget `memoryKiB × concurrency ≤ 192 MiB`).
+  The admission gate (below) runs **2** hashes at once (`Security:PublicExposureHardening:Argon2:MaxConcurrent`),
+  and the per-verify memory ceiling is derived from that real concurrency (192 MiB / 2 = 96 MiB per
+  hash; `Security:Argon2:MaxConcurrency` can only raise the divisor). Benchmark evidence
+  (`tools/BitosX.Benchmarks`, Release):
 
   | cap | single (ms) | p50 (ms) | p95 (ms) | throughput (h/s) | peak WS (MiB) |
   |----:|------------:|---------:|---------:|-----------------:|--------------:|
@@ -166,9 +170,9 @@ never honoured it.
   | 3 | ~191 | ~4038 | ~6572 | ~3.6 | ~344 |
 
   On a single vCPU, memory-hard hashes cannot truly run in parallel; higher caps only
-  queue and inflate memory/latency. **cap=1** was chosen for the lowest memory footprint
-  (~104 MiB incl. runtime) and predictable latency; concurrent bursts are additionally
-  bounded by rate limiting (a production blocker). Single-hash latency (~0.2–0.4 s) is
+  queue and inflate memory/latency. The benchmark favoured cap=1 for memory; the admission
+  gate runs 2 (cap=2 measured ~168 MiB peak and better throughput) with 4 more queued, which
+  stays inside the budget; concurrent bursts are additionally bounded by rate limiting. Single-hash latency (~0.2–0.4 s) is
   acceptable for a rate-limited, once-per-verification cost. The PHC parser
   rejects out-of-budget/hostile parameters (`MaxVerifyMemoryKiB` = `floor(192 MiB /
   concurrency)`, `MaxVerifyIterations ≈ 2× active`, `p=1` only) **before** any Argon2
@@ -188,8 +192,10 @@ never honoured it.
   still a generic 202); (2) a **fresh per-row eligibility re-check** immediately before
   send; (3) the **verify endpoint** independently rejects consumed/invalidated/expired
   tokens. A bounded SMTP attempt timeout is enforced to always be shorter than the outbox
-  lease (`LeaseDuration > SmtpTimeout + margin`, validated fail-closed at startup), so a
-  delivery never outlives its lease. Verification state remains authoritative regardless
+  lease (`LeaseDuration > SmtpTimeout + margin`, validated fail-closed at startup), and the
+  dispatcher **renews the lease of each row right before its send** (a batch is claimed with one
+  lease; a row whose lease passed to another worker is not sent), so a delivery never outlives
+  its lease. The outbox options (`Email:Outbox:*`) are validated fail-closed at startup. Verification state remains authoritative regardless
   of unusual SMTP behavior; a Gmail/provider-level **duplicate** may still occur in the
   documented accept-before-crash window (a duplicate re-sends the same single link and
   never creates a second valid challenge).
@@ -200,7 +206,12 @@ never honoured it.
   length-prefixed). The dispatcher checks the challenge is still active and verifies
   recipient integrity **before** sending, never sends after expiry/invalidation, uses
   bounded retries within the token TTL, and erases the encrypted payload on terminal
-  state. Live encrypted token payloads persist ≤ 24 h; sanitized metadata ≤ 7 days.
+  state. Live encrypted token payloads persist ≤ 24 h; sanitized metadata ≤ 7 days
+  (`Email:Outbox:RetentionPeriod`, batched deletes over an index); the challenge rows themselves are
+  pruned by housekeeping (below).
+- **Email:PublicBaseUrl** (the web app every link points to) must be an absolute `https://` origin
+  whenever EmailVerification is enabled, or startup fails; `http://` is accepted only for a loopback
+  host in Development/Testing.
 - **Secrets** (`Security:EmailVerificationPepper`, `Security:EmailOutboxKey`,
   `Email:SmtpAppPassword`) live only in user-secrets / production injection — never in
   Git, DB, appsettings, or logs. Mutually independent and independent of vault crypto.
@@ -223,7 +234,31 @@ never honoured it.
   valid challenge).
 - **Anti-enumeration:** register/resend return a single generic 202; verify returns
   generic failures. Timing resistance is **best-effort** (SMTP off the request path;
-  no dummy hashing in register) — mandatory rate limiting precedes public exposure.
+  no dummy hashing in register) — see "Anti-enumeration: what holds" below.
+
+## Anti-enumeration: what holds, and the residual timing signal
+
+The **responses** never reveal whether an account exists: login answers one generic 401 for every
+credential failure, forgot-password / register / resend one generic 202, verify / reset one generic
+400, the second sign-in step one generic 401. Account and email identity are compared exactly
+(binary collation since migration 0007), so look-alike addresses are different identities.
+
+The **response time** is not constant, by an approved design decision (no dummy Argon2, which would
+let anyone spend the server's hashing capacity with unknown addresses):
+
+- **Login.** An unknown, unverified, disabled or password-less address is refused after one indexed
+  read; a login-capable address also runs Argon2id (~0.2–0.4 s on the production host). The 25–75 ms
+  jitter does not hide a difference of that size. While the Argon2 queue is full, only a
+  login-capable address can get the capacity 503 (an unknown one gets its 401 without touching the
+  queue).
+- **Forgot-password.** An eligible account costs a challenge + outbox transaction an unknown address
+  does not; the difference is milliseconds and forgot-password has no jitter.
+
+What bounds the signal: the per-IP, per-normalized-email and process-wide login limits and the
+forgot-password limits (hardened mode) cap how many addresses one source can probe, and every probe
+of a real address spends that address's own per-email budget. A per-email bucket can be drained by
+anyone who knows the address, which delays that account's own logins and resets for a few minutes —
+the documented price of a per-email limit that is identical for existing and unknown addresses.
 
 ## Login, sessions, access + refresh tokens
 
@@ -258,8 +293,12 @@ never honoured it.
   path, so malformed login config (short/non-canonical key, missing/duplicate `kid`, orphan
   previous key, blank issuer/audience, non-positive/oversized lifetimes) throws at startup
   and never registers a half-working login stack. Signing keys are Base64 secrets held only
-  in the secret store; `JwtOptions` carries no secret-revealing `ToString`. `UseAuthentication`
-  / JwtBearer / `/account/me` HTTP wiring is **deferred to Phase 2B**.
+  in the secret store; `JwtOptions` carries no secret-revealing `ToString`. JwtBearer consumes the
+  shared validation parameters, and the per-request session check is the single `OnTokenValidated`
+  seam.
+- **Session list** returns at most 200 current sessions, newest first.
+- **Timestamps** read from the database are UTC (`DateTimeKind=Utc` is forced on every connection),
+  so every timestamp the API returns ends in `Z`.
 
 ## Encrypted-envelope sync (phase 3)
 
@@ -279,12 +318,19 @@ the first server feature that touches the vault at all, so the boundary is state
 - **No merge.** The server never combines two envelopes (it could not: they are ciphertext). An
   upload names the revision the client last saw; if the server holds another, the upload is
   refused with 409 and the client decides. Two devices can therefore never silently overwrite
-  each other.
+  each other. **Revisions never restart:** a delete keeps the row as a tombstone (`envelope IS NULL`,
+  migration 0006) and the next upload continues at the last revision + 1, so an offline device's
+  recorded revision can never coincide with a new lineage.
 - **Limits.** Envelope ≤ 16 MiB decoded (`Security:Sync:MaxEnvelopeBytes`, validated at startup,
   never above the desktop format's own cap); the upload endpoint's body limit is raised to the
-  Base64 of that plus 1 KiB, every other endpoint keeps Kestrel's 64 KB. Under hardening, writes
-  are limited per account (30 burst / 10 per minute, keyed by the JWT `sub` — a server-issued
-  identity, never client input).
+  Base64 of that plus 1 KiB, every other endpoint keeps Kestrel's 64 KB (tested on a real Kestrel
+  listener). The column is `LONGBLOB` (migration 0006; `MEDIUMBLOB` was one byte short of 16 MiB).
+  Under hardening, writes are limited per account (30 burst / 10 per minute, keyed by the JWT `sub` —
+  a server-issued identity, never client input) by `PerAccountRateLimitMiddleware`, which runs after
+  authorization and **before the body is read**, so a limited upload costs no 22 MB read and parse.
+- **Concurrency.** The upload transaction runs under READ COMMITTED: the locking read of a missing
+  row (a first upload) takes no gap lock, so first uploads of different accounts cannot deadlock on
+  each other's insert. The account row lock serializes one account's uploads.
 - **Account deletion** cascades to the envelope (FK `ON DELETE CASCADE`); an upload for an account
   deleted meanwhile is refused (the account row is locked first) and nothing is written.
 - **Logging:** no envelope bytes, fingerprints or sizes are logged; the correlation id and the
@@ -318,18 +364,30 @@ the first server feature that touches the vault at all, so the boundary is state
   any Argon2; hashing outside any lock; then one `FOR UPDATE` transaction (authoritative time read
   after the lock) that replaces the hash, consumes the token, invalidates the account's other
   active reset challenges and revokes **every** session and refresh token in the canonical lock
-  order (accounts → sessions → refresh_tokens). No partial state: a failed re-check rolls back.
-- **Account deletion** (`POST /v1/account/delete`) is authenticated **and** password-confirmed; the
-  account id is the JWT `sub`, never body input. Argon2 verify runs outside any lock; the store
-  then locks the account row, re-checks the **exact PHC** it verified (a concurrent reset makes the
-  delete fail closed) and deletes the row, cascading to challenges, outbox rows, sessions, refresh
+  order (accounts → email_verification_challenges → sessions → refresh_tokens; the account row is
+  locked before the challenge, found by a non-locking locator). No partial state: a failed re-check
+  rolls back.
+- **Password change while signed in** (`POST /v1/account/password`, phase 8): new-password policy
+  first (no Argon2 for a request that cannot succeed), then the current password (Argon2, outside any
+  lock), then the TOTP/recovery code when TOTP is confirmed, then the new hash (Argon2, outside any
+  lock); one transaction in the canonical order re-checks the exact verified PHC, stores the new
+  hash, invalidates every open reset link and revokes every **other** session with its refresh
+  tokens — the caller's session stays valid. Every confirmation failure is the generic 403; limited
+  per account (5 burst / 1 per 3 min). The vault master password is unaffected.
+- **Account deletion** (`POST /v1/account/delete`) is authenticated **and** password-confirmed, and
+  needs a TOTP or recovery code as well when TOTP is confirmed (phase 8; password first, so a wrong
+  password never uses up a code; TOTP confirmed with the Totp capability off fails closed with 503);
+  the account id is the JWT `sub`, never body input. Argon2 verify runs outside any lock; the store
+  then locks the account row, re-checks the **exact PHC** it verified (ordinal comparison in code; a
+  concurrent reset makes the delete fail closed) and deletes the row, cascading to challenges, outbox rows, sessions, refresh
   tokens and `vault_blobs`. A leased outbox row that disappears mid-delivery is simply not sent
   (the dispatcher's fresh state read returns nothing). Wrong password → generic 403 (not 401).
 - **Rate limits** (hardened mode, same generic 429/503 contract): forgot/reset-password per trusted
   client IP (5 burst / 2 per 60 s), forgot-password per `SHA-256(normalizedEmail)` (3 burst / 1 per
-  5 min), account deletion per account id (5 burst / 1 per 3 min). Hardening is now composed with
-  AccountCore (not Login) because these limiters ride on EmailVerification alone. Argon2 admission
-  applies as always.
+  5 min), account deletion and password change per account id (5 burst / 1 per 3 min each).
+  Hardening is composed with AccountCore (not Login) because these limiters ride on EmailVerification
+  alone, and the Production gate requires it with either capability. Argon2 admission applies as
+  always.
 
 ## Second factor: TOTP (phase 7)
 
@@ -347,26 +405,34 @@ the first server feature that touches the vault at all, so the boundary is state
   JWT/refresh token: it stores an `mfa_challenges` row — SHA-256 verifier of a 256-bit opaque token
   (same scheme as refresh tokens), the SHA-256 fingerprint of the PHC that was just verified, the
   User-Agent — and returns 202 with the token (5-minute TTL). The second step strictly parses the
-  token, re-reads the account, requires the **same PHC fingerprint** (a password reset between the
-  steps kills the challenge), requires TOTP still confirmed, verifies and consumes the code, consumes
-  the challenge (conditional UPDATE, single use), and only then runs the same `CreateOnLoginAsync`
-  as a password-only login (exact-PHC re-check under the account lock). No Argon2 in step two.
+  token, asks the per-account attempt limiter, **reserves one attempt atomically** (a conditional
+  `UPDATE … SET attempt_count = attempt_count + 1 WHERE … attempt_count < 5`) before the code is
+  looked at, re-reads the account, requires the **same PHC fingerprint** (a password reset between
+  the steps kills the challenge), requires TOTP still confirmed, matches the code without consuming
+  it, consumes the challenge (conditional UPDATE, single use), only then uses up the code (so a
+  request that lost the challenge never spends a recovery code), and finally runs the same
+  `CreateOnLoginAsync` as a password-only login (exact-PHC re-check under the account lock). No
+  Argon2 in step two. Parallel requests on one challenge get at most 5 code checks in total.
 - **Codes.** RFC 6238 HMAC-SHA1 / 6 digits / 30 s (verified against the RFC's own test vectors),
   window ±1 step, constant-time comparison per candidate with every candidate evaluated. **Replay
   guard in the store:** `last_used_step` is advanced by a conditional UPDATE (`last_used_step <
   step`), so a code is accepted once and never for an older step, even under concurrent
   presentations. Recovery codes: 10 characters from a look-alike-free alphabet (~49 bits), stored as
-  keyed verifiers, consumed by conditional UPDATE (single use, account-bound). A wrong code
-  increments the challenge's attempt count; at 5 the challenge is consumed. The second-step
-  response is one generic 401 for every failure; no attempts-left hint.
+  keyed verifiers (unique per account, migration 0008), consumed by conditional UPDATE (single use,
+  account-bound). A wrong code keeps its reserved attempt; at 5 the challenge is consumed. The
+  second-step response is one generic 401 for every failure; no attempts-left hint.
 - **Enrollment** is password-confirmed (Argon2 outside any lock, through the admission gate); the
   secret is generated server-side (160 bits), returned once as Base32 + otpauth URI, stored
   encrypted with `confirmed_at NULL`. A pending secret is not a factor; it is replaced by the next
-  enroll and becomes the factor only when a valid code confirms it, which also issues the recovery
-  codes (returned once). Disable and recovery-code regeneration require password **then** code (a
+  enroll and becomes the factor only when a valid code confirms it — bound to the exact secret the
+  code matched (a re-enrollment in between makes the confirm fail) — which also issues the recovery
+  codes (returned once). Enrollment locks the account row first and runs under READ COMMITTED, so
+  first enrollments of different accounts cannot deadlock. Disable and recovery-code regeneration require password **then** code (a
   wrong password never consumes a code). Disabling deletes the secret, the codes and open challenges.
-- **Rate limits** (hardened mode): second step per trusted client IP (10 burst / 5 per 30 s),
-  TOTP management per account id (10 burst / 2 per 60 s). Same generic 429/503 contract.
+- **Rate limits** (hardened mode): second step per trusted client IP (10 burst / 5 per 30 s) and per
+  account across all its challenges (`MfaPerAccount`, 10 burst / 2 per 60 s, keyed by the account the
+  challenge resolves to), TOTP management per account id (10 burst / 2 per 60 s). Same generic
+  429/503 contract.
 - **Scope.** The second factor protects the account sign-in only. It cannot protect, recover or
   weaken the vault: the master password and the envelope are untouched (zero-knowledge boundary).
   Account deletion cascades the TOTP rows; a password reset keeps TOTP enabled.
@@ -396,11 +462,14 @@ Rejection is a generic **429** (`title: Too Many Requests`, `detail: Too many re
 plus `Retry-After` when available) that never reveals which limiter fired or any account/email/IP/token
 value; partition keys are never logged. Partition state is memory-bounded (≤4096 IP and ≤4096 email
 partitions, 30-min idle expiration). **`MaxPartitions` is a memory-safety boundary, not a reset lever:**
-a live (non-idle) limiter is **never** evicted to make room, so partition churn (flooding many distinct
-IPs/emails) cannot reset an exhausted limiter. Only entries already past the idle-expiration threshold are
-reclaimable (LRU applies solely among those). When the cache is full and no entry is idle-eligible, a
-**new** partition fails closed with a generic **503** (existing partitions always keep their limiter);
-capacity is never mapped to a `"overflow"`/`"unknown"` bucket, a credential 401, or unrestricted
+a limiter that still holds state is **never** evicted to make room, so partition churn (flooding many
+distinct IPs/emails) cannot reset an exhausted limiter. An entry is reclaimable only when it carries no
+state: idle past the threshold, **or with a bucket that has refilled to full capacity** (a full bucket is
+indistinguishable from a new one). When the cache is full and nothing is reclaimable, a **new**
+partition fails closed with a generic **503** (existing partitions always keep their limiter). The
+availability cost: an attacker who wants to keep new clients out must keep every one of 4096
+partitions drained, i.e. re-touch each within its refill period (seconds to minutes), not once per
+30 minutes; keys are full addresses, so this needs thousands of source addresses. Capacity is never mapped to a `"overflow"`/`"unknown"` bucket, a credential 401, or unrestricted
 execution. Inserts happen only under a lock after a capacity check, so the maximum is never exceeded under
 concurrency. A limiter/IP-resolution failure likewise fails closed (503), never falling through to
 unrestricted auth.
@@ -409,23 +478,27 @@ unrestricted auth.
 
 - **Bounded Argon2 work admission (ALWAYS active — independent of `Enabled`).** Password hashing is a
   resource-safety chokepoint, so the Argon2 gate is wired in `AddBitosxAccountCore` and applies to every
-  production Argon2 operation (login verify, email verification, password reset, account-deletion
-  confirmation; future password-change goes through the same hasher). Built on a BCL `ConcurrencyLimiter`: at most **2** operations execute, at most **4** wait
+  production Argon2 operation (login verify, email verification, password reset, password change,
+  account-deletion and TOTP-management confirmation). Built on a BCL `ConcurrencyLimiter`: at most **2** operations execute, at most **4** wait
   (**oldest-first / FIFO**), a queued operation waits at most **2 s**, and a further operation is rejected
   immediately. Queue-full and acquire-timeout both surface as an Application-level
   `PasswordHashingCapacityExceededException` (never a password mismatch); genuine cancellation propagates and
   is never rewritten. At the login boundary this maps to a generic **503** (`title: Service unavailable`,
   `detail: Service temporarily unavailable. Try again later.`, `Retry-After: 1`) — never a credential 401 and
-  never a token; the response discloses nothing about slots/queue/account/credentials. Its configuration
+  never a token; the response discloses nothing about slots or queue depth (but see "Anti-enumeration:
+  what holds" — only a login-capable account reaches the gate). verify-email, reset-password, password
+  change, deletion and TOTP management map it to the same 503. Its configuration
   (`Security:PublicExposureHardening:Argon2`) is validated fail-closed at startup even when hardening is disabled.
 - **Process-wide login budget (gated by `Enabled`).** One unpartitioned token bucket (30 burst / 15 per 15 s,
   `QueueLimit=0`), shared across all IPs and accounts, admitted AFTER the per-IP and per-email limiters (so a
   request already rejected there never consumes a global token) and BEFORE credential evaluation. Rejection is
   the same generic **429**; an unexpected limiter failure fails closed (503), never unrestricted login.
-- **Bounded login-response jitter (gated by `Enabled`).** A uniform 25–75 ms async delay applied ONLY to the
-  normal credential outcomes (200 / generic 401), after credential evaluation — never to 400/413/429/503 or a
-  canceled request, and never derived from any identity data. Defense-in-depth only; it does not replace
-  constant-time credential handling, Argon2 work, or rate limiting.
+- **Bounded login-response jitter (gated by `Enabled`).** A uniform 25–75 ms async delay applied after
+  credential evaluation to every outcome the login service returns — 200, the generic 401, the 202
+  "second factor required" and the 503 "two-factor unavailable" — and to every outcome of the second
+  sign-in step; never to 400/413/429, the Argon2-capacity 503, or a canceled request, and never derived
+  from any identity data. Defense-in-depth only; it does not hide the Argon2 cost (see
+  "Anti-enumeration: what holds") and does not replace Argon2 work or rate limiting.
 
 The login-path control order is: trusted client-IP → per-IP → 4 KiB body → per-normalized-email →
 process-wide budget → credential/Argon2 admission → jitter → 200/401.
@@ -436,7 +509,8 @@ process-wide budget → credential/Argon2 admission → jitter → 200/401.
   Production the `/openapi/v1.json` route is absent (normal 404). No production switch is introduced — a
   future interactive-docs exposure is a separate, explicit decision.
 - **Production posture fails closed at startup** (`ProductionExposureValidation`): in the Production
-  environment, `LoginEnabled` requires `Security:PublicExposureHardening:Enabled = true`, and any
+  environment, `LoginEnabled` **or** `EmailVerificationEnabled` requires
+  `Security:PublicExposureHardening:Enabled = true`, and any
   repository-controlled Kestrel/`urls` listener must be loopback-only — a wildcard/public
   (`0.0.0.0`/`[::]`/`*`/`+`/public address) or malformed listener refuses to start. Development/Test are
   unaffected.
@@ -448,8 +522,9 @@ The Cloudflare→Apache→loopback-Kestrel trust boundary and its host-side enfo
 binding, firewall, Apache real-IP config, secrets injection) are documented, with an app-enforced vs
 deployment-enforced checklist and verification commands, in [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
-**Implemented (phase 7):** `POST /v1/auth/login/totp` per-IP, `/v1/account/totp/*` per-account — see
-"Second factor: TOTP".
+**Implemented (phase 7, 8):** `POST /v1/auth/login/totp` per-IP and per-account, `/v1/account/totp/*`
+per-account — see "Second factor: TOTP". `POST /v1/account/password` per-account — see "Password reset
+and account deletion". The sync write limiter runs as middleware before the body is read.
 
 **Implemented (phase 6):** `POST /v1/auth/forgot-password` per-IP + per-normalized-email,
 `POST /v1/auth/reset-password` per-IP (shared bucket), `POST /v1/account/delete` per-account — see
@@ -459,6 +534,24 @@ deployment-enforced checklist and verification commands, in [`DEPLOYMENT.md`](DE
 (`/register`, `/resend-verification`, `/verify-email`) and a global outbound-email budget remain future
 policy — no dead endpoint code is added. Kestrel stays **loopback-only** and the public Apache/Cloudflare
 path must not be configured until the **[host]** items in `DEPLOYMENT.md` are verified.
+
+## Housekeeping (phase 8)
+
+A hosted service (`Housekeeping:*`, validated at startup, on by default) deletes, after a retention
+window (`Housekeeping:RetentionDays`, default 30): email-verification and password-reset challenges
+that expired (their outbox rows cascade), MFA challenges that expired, and sessions that were revoked,
+absolute-expired or idle-expired (their refresh tokens cascade). Every delete is a bounded batch over
+an index (migration 0008), `Housekeeping:BatchSize` rows at a time, at most
+`Housekeeping:MaxBatchesPerRun` batches per table per run. Accounts are never pruned. Logs carry counts
+only.
+
+## Migrations
+
+Schema changes are applied by `dotnet BitosX.Api.dll migrate` with the separate schema-management
+account (`ConnectionStrings:BitosxMigrator`); the web host never reads that secret and runs with the
+DML-only runtime account. A migration run holds a named advisory lock (`GET_LOCK`), records a script only
+after all of it succeeded, and stops at the first failure naming the script (DDL commits implicitly, so
+a failed script may be partially applied and must be inspected before the run is repeated).
 
 ## Known incomplete security work (must precede public account/auth go-live)
 
@@ -470,8 +563,7 @@ production go-live **must be blocked** until they are completed and verified:
 - Cloudflare-only origin protection,
 - Apache reverse proxy to Kestrel (with reviewed real-client-IP handling),
 - production `systemd` service,
-- production DB secret injection, backups, and (recommended) a separate
-  migrator vs. runtime DB user (local `bitosx` DB + least-privilege user is done),
-- the account/auth implementation itself (hashing, tokens, sessions, etc.).
+- production DB secret injection and backups (the separate migrator vs. runtime DB user is in
+  place: the web host uses the DML-only account, `migrate` the schema account).
 
-**A working API foundation does not make this server production-ready.**
+Each **[host]** item in `DEPLOYMENT.md` must be verified on the production host before exposure.

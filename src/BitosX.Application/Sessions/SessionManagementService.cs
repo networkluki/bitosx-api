@@ -30,8 +30,9 @@ public sealed class SessionManagementService : ISessionManagementService
     public async Task<IReadOnlyList<SessionListItem>> ListSessionsAsync(Guid accountId, Guid currentSessionId, CancellationToken cancellationToken = default)
     {
         var rows = await _sessionStore.ListSessionsAsync(accountId, cancellationToken).ConfigureAwait(false);
-        var items = new List<SessionListItem>(rows.Count);
-        foreach (var row in rows)
+        var items = new List<SessionListItem>(Math.Min(rows.Count, SessionListLimits.MaxListedSessions));
+        // The store already returns the newest MaxListedSessions; the cap is re-applied so no store can exceed it.
+        foreach (var row in rows.Take(SessionListLimits.MaxListedSessions))
         {
             var idleExpiry = row.LastSeenAt + _options.IdleLifetime;
             var effectiveExpiry = idleExpiry < row.AbsoluteExpiresAt ? idleExpiry : row.AbsoluteExpiresAt;

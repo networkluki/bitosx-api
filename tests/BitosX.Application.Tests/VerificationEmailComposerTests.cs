@@ -72,3 +72,45 @@ public sealed class VerificationEmailComposerTests
         }
     }
 }
+
+public sealed class EmailPublicBaseUrlValidationTests
+{
+    private static void Valid(string url, bool loopbackHttp = false) => new EmailOptions { PublicBaseUrl = url }.ValidatePublicBaseUrl(loopbackHttp);
+
+    private static void Invalid(string? url, bool loopbackHttp = false)
+        => Assert.Throws<InvalidOperationException>(() => new EmailOptions { PublicBaseUrl = url! }.ValidatePublicBaseUrl(loopbackHttp));
+
+    [Theory]
+    [InlineData("https://vault.bitosx.se")]
+    [InlineData("https://vault.bitosx.se/")]
+    [InlineData("https://vault.bitosx.se:8443")]
+    public void HttpsOrigins_AreAccepted(string url) => Valid(url);
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    [InlineData("/verify")]
+    [InlineData("vault.bitosx.se")]
+    [InlineData("http://vault.bitosx.se")]
+    [InlineData("http://localhost:5173")]           // loopback http only when explicitly allowed
+    [InlineData("ftp://vault.bitosx.se")]
+    [InlineData("https://vault.bitosx.se/app")]
+    [InlineData("https://vault.bitosx.se?x=1")]
+    [InlineData("https://vault.bitosx.se#x")]
+    [InlineData("https://user@vault.bitosx.se")]
+    public void EverythingElse_FailsClosed(string? url) => Invalid(url);
+
+    [Theory]
+    [InlineData("http://localhost:5173")]
+    [InlineData("http://127.0.0.1:8080")]
+    [InlineData("http://[::1]:8080")]
+    public void LoopbackHttp_IsAccepted_OnlyWhenAllowed(string url)
+    {
+        Valid(url, loopbackHttp: true);
+        Invalid(url, loopbackHttp: false);
+    }
+
+    [Fact]
+    public void NonLoopbackHttp_IsRejected_EvenWhenLoopbackIsAllowed() => Invalid("http://vault.bitosx.se", loopbackHttp: true);
+}

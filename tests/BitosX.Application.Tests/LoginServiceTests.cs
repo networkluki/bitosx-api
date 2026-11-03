@@ -83,6 +83,24 @@ public sealed class LoginServiceTests
     // ---- input / normalization ----
 
     [Fact]
+    public async Task ARowWhoseNormalizedEmailIsNotExactlyTheTypedOne_IsNotThisLogin_NoArgon2()
+    {
+        var h = Build(seedAccount: false);
+        var lookAlike = "JOSÉ@EXAMPLE.COM";
+        h.Accounts.SeedUnderKey(EmailNormalizer.Normalize("jose@example.com"), new Account
+        {
+            Id = AccountId, Email = "josé@example.com", NormalizedEmail = lookAlike,
+            EmailVerifiedAt = SessionCreatedAt, PasswordHash = Phc, CreatedAt = SessionCreatedAt, UpdatedAt = SessionCreatedAt,
+        });
+
+        var r = await h.Service.LoginAsync(new LoginCommand("jose@example.com", GoodPassword));
+
+        Assert.Equal(LoginOutcome.InvalidCredentials, r.Outcome);
+        Assert.Equal(0, h.Hasher.VerifyCalls);
+        Assert.Equal(0, h.Mfa.CreateCalls);
+    }
+
+    [Fact]
     public async Task ValidEmail_NormalizedBeforeLookup()
     {
         var h = Build();

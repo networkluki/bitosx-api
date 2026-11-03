@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using BitosX.Application.Abstractions.Persistence;
 using BitosX.Application.Security;
+using BitosX.Application.Sessions;
 using Dapper;
 
 namespace BitosX.Infrastructure.Persistence;
@@ -386,7 +387,8 @@ public sealed class SessionStore : ISessionStore
         // READ-ONLY, no lock. CURRENT USABLE sessions only (not history): unrevoked AND not
         // absolute-expired AND within the idle window — the same predicate SessionAuthenticator
         // uses (absolute_expires_at == now excluded; idle age == IdleLifetime excluded). One
-        // authoritative TimeProvider now; no local time, no DB NOW().
+        // authoritative TimeProvider now; no local time, no DB NOW(). Newest first, capped at
+        // SessionListLimits.MaxListedSessions (the clients size their reads for that many).
         var now = _clock.GetUtcNow().UtcDateTime;
         var idleCutoff = now - _options.IdleLifetime;
 
@@ -399,8 +401,9 @@ public sealed class SessionStore : ISessionStore
               AND revoked_at IS NULL
               AND absolute_expires_at > @now
               AND last_seen_at > @idleCutoff
-            ORDER BY created_at DESC, id;
-            """, new { accountId, now, idleCutoff }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            ORDER BY created_at DESC, id
+            LIMIT @limit;
+            """, new { accountId, now, idleCutoff, limit = SessionListLimits.MaxListedSessions }, cancellationToken: cancellationToken)).ConfigureAwait(false);
         return rows.ToList();
     }
 

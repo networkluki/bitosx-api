@@ -52,7 +52,21 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
         byte[] verifierHash, string passwordHashPhc, CancellationToken cancellationToken = default)
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+
+        // Canonical lock order accounts → challenges (the same as resend, reset issuing and account deletion):
+        // a non-locking locator finds the account, the account row is locked first, and only then the challenge.
+        // Locking "challenge JOIN account" by token hash would lock the challenge first (it drives the join).
+        var accountId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+            "SELECT account_id FROM email_verification_challenges WHERE token_hash = @verifierHash AND purpose = @purpose LIMIT 1;",
+            new { verifierHash, purpose = ChallengePurposes.EmailVerification }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        if (accountId is null)
+        {
+            return VerificationOutcome.InvalidOrExpired;
+        }
+
         await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "SELECT id FROM accounts WHERE id = @accountId FOR UPDATE;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         // Lock the challenge/account WITHOUT an expiry predicate (a caller time could be
         // stale after a lock wait). Expiry is decided against an authoritative timestamp
@@ -64,6 +78,7 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
                 FROM email_verification_challenges c
                 JOIN accounts a ON a.id = c.account_id
                 WHERE c.token_hash = @verifierHash
+                  AND c.account_id = @accountId
                   AND c.purpose = @purpose
                   AND c.consumed_at IS NULL
                   AND c.invalidated_at IS NULL
@@ -71,7 +86,7 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
                   AND a.password_hash IS NULL
                   AND a.disabled_at IS NULL
                 FOR UPDATE;
-                """, new { verifierHash, purpose = ChallengePurposes.EmailVerification }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+                """, new { verifierHash, accountId, purpose = ChallengePurposes.EmailVerification }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         if (row is null)
         {
@@ -118,7 +133,9 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
         DateTime nowUtc, TimeSpan minReissueInterval, CancellationToken cancellationToken = default)
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        // READ COMMITTED for the same reason as password-reset issuing: record locks only, no gap locks on the
+        // challenge range, so adjacent accounts cannot deadlock on each other's challenge insert.
+        await using var tx = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false);
 
         // Lock the account; only unverified accounts are eligible.
         var eligible = await connection.QuerySingleOrDefaultAsync<Guid?>(

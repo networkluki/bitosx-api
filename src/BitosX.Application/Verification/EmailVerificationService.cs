@@ -67,6 +67,11 @@ public sealed class EmailVerificationService : IEmailVerificationService
             return VerifyResult.InvalidPassword;
         }
 
+        if (string.IsNullOrEmpty(command.Token))
+        {
+            return VerifyResult.Invalid; // missing/null token: the documented 400, never a null dereference
+        }
+
         byte[] verifier;
         try
         {

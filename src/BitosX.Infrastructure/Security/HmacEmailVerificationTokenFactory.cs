@@ -42,8 +42,13 @@ public sealed class HmacEmailVerificationTokenFactory : IEmailVerificationTokenF
     private static string Base64UrlEncode(byte[] data)
         => Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
-    private static byte[] Base64UrlDecode(string value)
+    private static byte[] Base64UrlDecode(string? value)
     {
+        if (string.IsNullOrEmpty(value))
+        {
+            throw new FormatException("Missing Base64Url token."); // callers map FormatException to "invalid token"
+        }
+
         var s = value.Replace('-', '+').Replace('_', '/');
         var padded = (s.Length % 4) switch
         {

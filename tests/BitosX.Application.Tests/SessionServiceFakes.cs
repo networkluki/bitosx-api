@@ -205,12 +205,17 @@ internal sealed class FakeTotpStore : BitosX.Application.Abstractions.Persistenc
     { GetCalls++; return Task.FromResult(Enrollment); }
     public Task<BitosX.Application.Abstractions.Persistence.TotpPendingOutcome> StorePendingAsync(Guid accountId, BitosX.Application.Mfa.ProtectedTotpSecret secret, DateTime now, CancellationToken ct = default)
     { StorePendingCalls++; LastPendingSecret = secret; return Task.FromResult(StorePendingOutcome); }
-    public Task<BitosX.Application.Abstractions.Persistence.TotpConfirmOutcome> ConfirmAsync(Guid accountId, long usedStep, IReadOnlyList<byte[]> verifiers, DateTime now, CancellationToken ct = default)
-    { ConfirmCalls++; LastConfirmedStep = usedStep; LastVerifiers = verifiers; return Task.FromResult(ConfirmOutcome); }
+    public byte[]? LastConfirmNonce { get; private set; }
+    public Task<BitosX.Application.Abstractions.Persistence.TotpConfirmOutcome> ConfirmAsync(Guid accountId, byte[] expectedSecretNonce, long usedStep, IReadOnlyList<byte[]> verifiers, DateTime now, CancellationToken ct = default)
+    { ConfirmCalls++; LastConfirmNonce = expectedSecretNonce; LastConfirmedStep = usedStep; LastVerifiers = verifiers; return Task.FromResult(ConfirmOutcome); }
     public Task<bool> TryConsumeStepAsync(Guid accountId, long step, CancellationToken ct = default)
-    { ConsumeStepCalls++; LastConsumedStep = step; return Task.FromResult(ConsumeStepResult); }
+    { ConsumeStepCalls++; LastConsumedStep = step; Trace?.Add("consume-code"); return Task.FromResult(ConsumeStepResult); }
+    public int HasRecoveryCalls { get; private set; }
+    public List<string>? Trace { get; set; }
+    public Task<bool> HasUnusedRecoveryCodeAsync(Guid accountId, byte[] verifier, CancellationToken ct = default)
+    { HasRecoveryCalls++; return Task.FromResult(ConsumeRecoveryResult); }
     public Task<bool> TryConsumeRecoveryCodeAsync(Guid accountId, byte[] verifier, DateTime now, CancellationToken ct = default)
-    { ConsumeRecoveryCalls++; LastRecoveryVerifier = verifier; return Task.FromResult(ConsumeRecoveryResult); }
+    { ConsumeRecoveryCalls++; LastRecoveryVerifier = verifier; Trace?.Add("consume-code"); return Task.FromResult(ConsumeRecoveryResult); }
     public Task<int> CountUnusedRecoveryCodesAsync(Guid accountId, CancellationToken ct = default) => Task.FromResult(UnusedRecoveryCodes);
     public Task<bool> ReplaceRecoveryCodesAsync(Guid accountId, IReadOnlyList<byte[]> verifiers, DateTime now, CancellationToken ct = default)
     { ReplaceCalls++; LastVerifiers = verifiers; return Task.FromResult(ReplaceResult); }
@@ -232,8 +237,29 @@ internal sealed class FakeMfaChallengeStore : BitosX.Application.Abstractions.Pe
     { CreateCalls++; Created = challenge with { TokenVerifier = (byte[])challenge.TokenVerifier.Clone() }; return Task.CompletedTask; }
     public Task<BitosX.Application.Abstractions.Persistence.MfaChallengeView?> FindActiveAsync(byte[] verifier, DateTime now, CancellationToken ct = default)
     { LastLookupVerifier = (byte[])verifier.Clone(); return Task.FromResult(Active); }
-    public Task<bool> TryConsumeAsync(Guid id, DateTime now, CancellationToken ct = default) { ConsumeCalls++; return Task.FromResult(ConsumeResult); }
-    public Task RecordFailedAttemptAsync(Guid id, int max, DateTime now, CancellationToken ct = default) { FailedAttemptCalls++; return Task.CompletedTask; }
+    public int ReserveCalls { get; private set; }
+    public int ReservedAttempts => _reserved;
+    public List<string>? Trace { get; set; }
+    private int _reserved;
+    private readonly object _gate = new();
+    public bool ReserveResult { get; set; } = true;
+
+    public Task<bool> TryConsumeAsync(Guid id, DateTime now, CancellationToken ct = default) { ConsumeCalls++; Trace?.Add("consume-challenge"); return Task.FromResult(ConsumeResult); }
+
+    /// <summary>Atomic like the real conditional UPDATE: at most <paramref name="max"/> reservations ever succeed.</summary>
+    public Task<bool> TryReserveAttemptAsync(Guid id, int max, DateTime now, CancellationToken ct = default)
+    {
+        ReserveCalls++;
+        Trace?.Add("reserve");
+        lock (_gate)
+        {
+            if (!ReserveResult || _reserved + (Active?.AttemptCount ?? 0) >= max) return Task.FromResult(false);
+            _reserved++;
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task CloseIfAttemptsExhaustedAsync(Guid id, int max, DateTime now, CancellationToken ct = default) { FailedAttemptCalls++; return Task.CompletedTask; }
 }
 
 /// <summary>Plain (unkeyed, test-only) ITotpCrypto: XOR-free pass-through with an account-bound tag check.</summary>

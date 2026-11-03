@@ -50,6 +50,12 @@ public sealed class HmacEmailVerificationTokenFactoryTests
         Assert.False(CryptographicOperations.FixedTimeEquals(f2.ComputeVerifier(t.TokenBase64Url), t.VerifierHash));
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void ComputeVerifier_MissingToken_IsAFormatError_NotANullReference(string? token)
+        => Assert.Throws<FormatException>(() => Factory().ComputeVerifier(token!));
+
     [Fact]
     public void MissingPepper_Throws()
         => Assert.Throws<InvalidOperationException>(() => new HmacEmailVerificationTokenFactory(new EmailVerificationSecurityOptions { Pepper = "" }));

@@ -63,6 +63,40 @@ public sealed class BrowserCorsOptionsTests
     [Fact] public void EmbeddedWhitespace_Rejected() => AssertRejected("https://vault bitosx.se");
     [Fact] public void TooLong_Rejected() => AssertRejected("https://" + new string('a', 300) + ".se");
 
+    [Fact]
+    public void StatusPageOrigins_Bind_AndUseTheSameValidation()
+    {
+        var o = Bind(new() { [P + "StatusPageOrigins"] = "https://bitosx.se" });
+        Assert.False(o.Enabled); // no browser-client origin: only the status policy exists
+        Assert.True(o.StatusPolicyEnabled);
+        Assert.Equal(["https://bitosx.se"], o.StatusOrigins);
+
+        Assert.Throws<InvalidOperationException>(() => Bind(new() { [P + "StatusPageOrigins"] = "http://bitosx.se" }));
+        Assert.Throws<InvalidOperationException>(() => Bind(new() { [P + "StatusPageOrigins"] = "*" }));
+        Assert.Throws<InvalidOperationException>(() => Bind(new() { [P + "StatusPageOrigins"] = "https://bitosx.se/" }));
+        Assert.Throws<InvalidOperationException>(() => Bind(new() { [P + "StatusPageOrigins"] = "https://bitosx.se;https://bitosx.se" }));
+    }
+
+    [Fact]
+    public void StatusPolicy_IsGetOnly_AndAdmitsBothOriginLists()
+    {
+        var policy = Bind(new() { [P + "AllowedOrigins"] = "https://vault.bitosx.se", [P + "StatusPageOrigins"] = "https://bitosx.se" }).BuildStatusPolicy();
+
+        Assert.Equal(["GET"], policy.Methods);
+        Assert.False(policy.SupportsCredentials);
+        Assert.False(policy.AllowAnyOrigin);
+        Assert.True(policy.IsOriginAllowed("https://bitosx.se"));
+        Assert.True(policy.IsOriginAllowed("https://vault.bitosx.se"));
+        Assert.False(policy.IsOriginAllowed("https://www.bitosx.se"));
+    }
+
+    [Fact]
+    public void BrowserClientPolicy_DoesNotAdmitStatusPageOrigin()
+    {
+        var policy = Bind(new() { [P + "AllowedOrigins"] = "https://vault.bitosx.se", [P + "StatusPageOrigins"] = "https://bitosx.se" }).BuildPolicy();
+        Assert.False(policy.IsOriginAllowed("https://bitosx.se"));
+    }
+
     [Fact] public void NegativeMaxAge_Rejected() => Assert.Throws<InvalidOperationException>(() => Bind(new() { [P + "PreflightMaxAgeSeconds"] = "-1" }));
     [Fact] public void MaxAgeAboveOneDay_Rejected() => Assert.Throws<InvalidOperationException>(() => Bind(new() { [P + "PreflightMaxAgeSeconds"] = "86401" }));
 
@@ -79,7 +113,7 @@ public sealed class BrowserCorsOptionsTests
         Assert.False(policy.AllowAnyHeader);
         Assert.False(policy.SupportsCredentials);
         Assert.Equal(["https://vault.bitosx.se"], policy.Origins);
-        Assert.Equal(["GET", "POST", "DELETE"], policy.Methods);
+        Assert.Equal(["GET", "POST", "PUT", "DELETE"], policy.Methods);
         Assert.Equal(["Authorization", "Content-Type", "Accept"], policy.Headers);
         Assert.Equal(["Retry-After", "X-Correlation-ID"], policy.ExposedHeaders);
         Assert.Equal(TimeSpan.FromSeconds(120), policy.PreflightMaxAge);
@@ -98,6 +132,7 @@ public sealed class CorsEndpointTests : IClassFixture<WebApplicationFactory<Prog
 {
     private const string VaultOrigin = "https://vault.bitosx.se";
     private const string OtherOrigin = "https://attacker.example";
+    private const string StatusOrigin = "https://bitosx.se";
 
     private readonly WebApplicationFactory<Program> _factory;
 
@@ -127,7 +162,7 @@ public sealed class CorsEndpointTests : IClassFixture<WebApplicationFactory<Prog
         Assert.Equal(VaultOrigin, Header(resp, "Access-Control-Allow-Origin"));
         var methods = Header(resp, "Access-Control-Allow-Methods")!;
         Assert.Contains("POST", methods);
-        Assert.DoesNotContain("PUT", methods);
+        Assert.DoesNotContain("PATCH", methods);
         var headers = Header(resp, "Access-Control-Allow-Headers")!;
         Assert.Contains("Authorization", headers, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Content-Type", headers, StringComparison.OrdinalIgnoreCase);
@@ -148,6 +183,95 @@ public sealed class CorsEndpointTests : IClassFixture<WebApplicationFactory<Prog
         Assert.Contains("DELETE", Header(resp, "Access-Control-Allow-Methods")!);
     }
 
+    // The web vault saves with PUT /v1/sync/envelope: without PUT in the policy every browser refuses the upload.
+    [Fact]
+    public async Task Preflight_ForEnvelopeUpload_AllowsPut()
+    {
+        var resp = await _factory.CreateClient().SendAsync(
+            Preflight("/v1/sync/envelope", VaultOrigin, "PUT", "content-type,authorization"));
+
+        Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
+        Assert.Equal(VaultOrigin, Header(resp, "Access-Control-Allow-Origin"));
+        Assert.Contains("PUT", Header(resp, "Access-Control-Allow-Methods")!);
+        Assert.Null(Header(resp, "Access-Control-Allow-Credentials"));
+    }
+
+    // The product page (shipped as Security:Cors:StatusPageOrigins) may read /health and /version only.
+    [Theory]
+    [InlineData("/health")]
+    [InlineData("/version")]
+    public async Task StatusPageOrigin_MayReadHealthAndVersion(string path)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Get, path);
+        req.Headers.Add("Origin", StatusOrigin);
+        var resp = await _factory.CreateClient().SendAsync(req);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal(StatusOrigin, Header(resp, "Access-Control-Allow-Origin"));
+        Assert.Null(Header(resp, "Access-Control-Allow-Credentials"));
+    }
+
+    [Fact]
+    public async Task VaultOrigin_MayStillReadHealth()
+    {
+        var req = new HttpRequestMessage(HttpMethod.Get, "/version");
+        req.Headers.Add("Origin", VaultOrigin);
+        var resp = await _factory.CreateClient().SendAsync(req);
+
+        Assert.Equal(VaultOrigin, Header(resp, "Access-Control-Allow-Origin"));
+    }
+
+    [Theory]
+    [InlineData("/v1/auth/login", "POST")]
+    [InlineData("/v1/sync/envelope", "PUT")]
+    [InlineData("/v1/account/me", "GET")]
+    public async Task StatusPageOrigin_GetsNoCorsHeaders_FromAnyOtherEndpoint(string path, string method)
+    {
+        var pre = await _factory.CreateClient().SendAsync(Preflight(path, StatusOrigin, method));
+        Assert.Null(Header(pre, "Access-Control-Allow-Origin"));
+        Assert.Null(Header(pre, "Access-Control-Allow-Methods"));
+    }
+
+    [Fact]
+    public async Task StatusPageOrigin_ActualRequestToAnotherEndpoint_GetsNoCorsHeaders()
+    {
+        var req = new HttpRequestMessage(HttpMethod.Get, "/openapi/v1.json"); // any non-status route (404 here)
+        req.Headers.Add("Origin", StatusOrigin);
+        var resp = await _factory.CreateClient().SendAsync(req);
+        Assert.Null(Header(resp, "Access-Control-Allow-Origin"));
+    }
+
+    [Fact]
+    public async Task StatusPage_Preflight_ForHealth_ListsOnlyGet()
+    {
+        var resp = await _factory.CreateClient().SendAsync(Preflight("/health", StatusOrigin, "GET", null));
+
+        Assert.Equal(StatusOrigin, Header(resp, "Access-Control-Allow-Origin"));
+        var methods = Header(resp, "Access-Control-Allow-Methods")!;
+        Assert.Contains("GET", methods);
+        Assert.DoesNotContain("POST", methods);
+        Assert.DoesNotContain("PUT", methods);
+        Assert.DoesNotContain("DELETE", methods);
+    }
+
+    [Fact]
+    public async Task StatusPageOnly_Configuration_ServesHealthButNothingElse()
+    {
+        using var f = _factory.WithWebHostBuilder(b =>
+        {
+            b.UseSetting("Security:Cors:AllowedOrigins", "");
+            b.UseSetting("Security:Cors:StatusPageOrigins", StatusOrigin);
+        });
+        var client = f.CreateClient();
+
+        var req = new HttpRequestMessage(HttpMethod.Get, "/health");
+        req.Headers.Add("Origin", StatusOrigin);
+        Assert.Equal(StatusOrigin, Header(await client.SendAsync(req), "Access-Control-Allow-Origin"));
+
+        var pre = await client.SendAsync(Preflight("/v1/auth/login", VaultOrigin, "POST"));
+        Assert.Null(Header(pre, "Access-Control-Allow-Origin"));
+    }
+
     // The framework answers the preflight for an allowed origin and lists what the policy permits; the
     // browser then refuses the real request because the header/method it wanted is missing from the list.
     [Fact]
@@ -162,10 +286,9 @@ public sealed class CorsEndpointTests : IClassFixture<WebApplicationFactory<Prog
     [Fact]
     public async Task Preflight_WithDisallowedMethod_DoesNotListIt()
     {
-        var resp = await _factory.CreateClient().SendAsync(Preflight("/v1/account/me", VaultOrigin, "PUT", null));
+        var resp = await _factory.CreateClient().SendAsync(Preflight("/v1/account/me", VaultOrigin, "PATCH", null));
 
         var methods = Header(resp, "Access-Control-Allow-Methods") ?? string.Empty;
-        Assert.DoesNotContain("PUT", methods, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("PATCH", methods, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -236,7 +359,11 @@ public sealed class CorsEndpointTests : IClassFixture<WebApplicationFactory<Prog
     [Fact]
     public async Task Disabled_EmptyOriginList_EmitsNoCorsHeadersAtAll()
     {
-        using var f = WithSetting(_factory, "Security:Cors:AllowedOrigins", "");
+        using var f = _factory.WithWebHostBuilder(b =>
+        {
+            b.UseSetting("Security:Cors:AllowedOrigins", "");
+            b.UseSetting("Security:Cors:StatusPageOrigins", "");
+        });
         var client = f.CreateClient();
 
         var pre = await client.SendAsync(Preflight("/v1/auth/login", VaultOrigin, "POST"));

@@ -79,6 +79,21 @@ public sealed class TotpEnrollmentServiceTests
         Assert.Equal(Rfc6238Totp.Step(_clock.GetUtcNow().ToUnixTimeSeconds(), 30), _store.LastConfirmedStep);
         Assert.Equal(r.RecoveryCodes.Select(c => _crypto.RecoveryCodeVerifier(RecoveryCodes.Canonicalize(c)!)), _store.LastVerifiers);
         Assert.DoesNotContain(r.RecoveryCodes[0], r.ToString());
+        Assert.Equal(_store.Enrollment.Secret.Nonce, _store.LastConfirmNonce); // bound to the secret the code matched
+    }
+
+    [Fact]
+    public async Task Confirm_PendingSecretReplacedMeanwhile_IsNotPending_AndNoCodesAreShown()
+    {
+        SeedAccount();
+        var secret = new byte[20]; new Random(9).NextBytes(secret);
+        _store.Enrollment = new TotpEnrollment(AccountId, _crypto.Protect(secret, AccountId), Now, null, null);
+        _store.ConfirmOutcome = TotpConfirmOutcome.NotPending; // the store's nonce check failed
+
+        var r = await Service().ConfirmAsync(AccountId, CodeFor(secret));
+
+        Assert.Equal(TotpConfirmResult.NotPending, r.Outcome);
+        Assert.Empty(r.RecoveryCodes);
     }
 
     [Fact]

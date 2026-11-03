@@ -160,16 +160,45 @@ public sealed class SyncEndpointTests : IClassFixture<LoginApiFactory>, IAsyncLi
     }
 
     [Fact]
-    public async Task Delete_RemovesTheEnvelope_AndTheNextUploadStartsOver()
+    public async Task Delete_RemovesTheEnvelope_AndTheNextUploadContinuesTheRevisions()
+    {
+        var client = await SignedInClientAsync();
+        await client.PutAsJsonAsync("/v1/sync/envelope", new { baseRevision = 0, envelope = B64(Envelope) });
+        await client.PutAsJsonAsync("/v1/sync/envelope", new { baseRevision = 1, envelope = B64(Envelope) });
+
+        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync("/v1/sync/envelope")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/v1/sync/status")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/v1/sync/envelope")).StatusCode);
+
+        // Nothing is stored: only base 0 is accepted, and a stale base sees currentRevision 0.
+        var stale = await client.PutAsJsonAsync("/v1/sync/envelope", new { baseRevision = 2, envelope = B64(Envelope) });
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        Assert.Equal(0, JsonDocument.Parse(await stale.Content.ReadAsStringAsync()).RootElement.GetProperty("currentRevision").GetInt64());
+
+        // Revisions never restart: the next upload is 3, not 1.
+        var again = await client.PutAsJsonAsync("/v1/sync/envelope", new { baseRevision = 0, envelope = B64(Envelope) });
+        Assert.Equal(3, (await again.Content.ReadFromJsonAsync<SyncUploadResponse>())!.Revision);
+    }
+
+    [Fact]
+    public async Task Timestamps_ReadFromTheDatabase_CarryAnExplicitZ()
     {
         var client = await SignedInClientAsync();
         await client.PutAsJsonAsync("/v1/sync/envelope", new { baseRevision = 0, envelope = B64(Envelope) });
 
-        Assert.Equal(HttpStatusCode.NoContent, (await client.DeleteAsync("/v1/sync/envelope")).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/v1/sync/status")).StatusCode);
+        var status = JsonDocument.Parse(await (await client.GetAsync("/v1/sync/status")).Content.ReadAsStringAsync()).RootElement;
+        Assert.EndsWith("Z", status.GetProperty("updatedAt").GetString());
 
-        var again = await client.PutAsJsonAsync("/v1/sync/envelope", new { baseRevision = 0, envelope = B64(Envelope) });
-        Assert.Equal(1, (await again.Content.ReadFromJsonAsync<SyncUploadResponse>())!.Revision);
+        var sessions = JsonDocument.Parse(await (await client.GetAsync("/v1/account/sessions")).Content.ReadAsStringAsync()).RootElement;
+        foreach (var session in sessions.EnumerateArray())
+        {
+            Assert.EndsWith("Z", session.GetProperty("createdAt").GetString());
+            Assert.EndsWith("Z", session.GetProperty("lastSeenAt").GetString());
+            Assert.EndsWith("Z", session.GetProperty("expiresAt").GetString());
+        }
+
+        var me = JsonDocument.Parse(await (await client.GetAsync("/v1/account/me")).Content.ReadAsStringAsync()).RootElement;
+        Assert.EndsWith("Z", me.GetProperty("createdAt").GetString());
     }
 
     [Fact]

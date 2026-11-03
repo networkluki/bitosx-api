@@ -10,7 +10,7 @@ public sealed class AuthContractsSecurityTests
     [
         typeof(RegisterRequest), typeof(VerifyEmailRequest),
         typeof(ResendVerificationRequest), typeof(AcceptedResponse),
-        typeof(ForgotPasswordRequest), typeof(ResetPasswordRequest), typeof(DeleteAccountRequest),
+        typeof(ForgotPasswordRequest), typeof(ResetPasswordRequest), typeof(DeleteAccountRequest), typeof(ChangePasswordRequest),
         typeof(MfaChallengeResponse), typeof(TotpLoginRequest), typeof(TotpEnrollRequest), typeof(TotpEnrollResponse),
         typeof(TotpConfirmRequest), typeof(TotpRecoveryCodesResponse), typeof(TotpManageRequest), typeof(TotpStatusResponse),
     ];
@@ -53,11 +53,18 @@ public sealed class AuthContractsSecurityTests
     }
 
     [Fact]
-    public void DeleteAccountRequest_CarriesNoIdentity_OnlyPassword()
+    public void DeleteAccountRequest_CarriesNoIdentity_OnlyPasswordAndCode()
     {
         // The account to delete is always the authenticated caller's; the body must not be able to name another.
-        var names = typeof(DeleteAccountRequest).GetProperties().Select(p => p.Name).ToArray();
-        Assert.Equal(["Password"], names);
+        var names = typeof(DeleteAccountRequest).GetProperties().Select(p => p.Name).OrderBy(n => n).ToArray();
+        Assert.Equal(["Code", "Password"], names);
+    }
+
+    [Fact]
+    public void ChangePasswordRequest_CarriesNoIdentity()
+    {
+        var names = typeof(ChangePasswordRequest).GetProperties().Select(p => p.Name).OrderBy(n => n).ToArray();
+        Assert.Equal(["Code", "CurrentPassword", "NewPassword"], names);
     }
 
     [Fact]

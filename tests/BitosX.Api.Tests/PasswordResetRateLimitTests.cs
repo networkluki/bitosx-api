@@ -95,4 +95,37 @@ public sealed class PasswordResetRateLimitTests : IClassFixture<HardenedAuthApiF
         Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
         Assert.Equal(1L, await _factory.QueryScalarAsync<long>("SELECT COUNT(*) FROM accounts WHERE normalized_email=@e", "@e", email.ToUpperInvariant()));
     }
+
+    [Fact]
+    public async Task ChangePassword_PerAccount_SixthAttemptIsLimited()
+    {
+        var email = await _factory.CreateVerifiedAccountAsync(ValidPassword);
+        var loginResp = await HardenedAuthApiFactory.SendAsync(_factory.CreateClient(), HttpMethod.Post, "/v1/auth/login", new { email, password = ValidPassword }, "127.0.0.1", ClientIp());
+        loginResp.EnsureSuccessStatusCode();
+        var tokens = (await loginResp.Content.ReadFromJsonAsync<TokenResponse>())!;
+        var authed = _factory.CreateClient();
+        authed.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", tokens.AccessToken);
+
+        for (var i = 0; i < 5; i++)
+        {
+            var resp = await HardenedAuthApiFactory.SendAsync(authed, HttpMethod.Post, "/v1/account/password",
+                new { currentPassword = "Wrong-Password-Entirely-9", newPassword = "Brand-New-Account-Password-2" }, "127.0.0.1", ClientIp());
+            Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+        }
+
+        var limited = await HardenedAuthApiFactory.SendAsync(authed, HttpMethod.Post, "/v1/account/password",
+            new { currentPassword = ValidPassword, newPassword = "Brand-New-Account-Password-2" }, "127.0.0.1", ClientIp());
+        Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
+        Assert.NotNull(limited.Headers.RetryAfter);
+
+        // The limit is per account: another account is unaffected.
+        var otherEmail = await _factory.CreateVerifiedAccountAsync(ValidPassword);
+        var otherLogin = await HardenedAuthApiFactory.SendAsync(_factory.CreateClient(), HttpMethod.Post, "/v1/auth/login", new { email = otherEmail, password = ValidPassword }, "127.0.0.1", ClientIp());
+        var otherTokens = (await otherLogin.Content.ReadFromJsonAsync<TokenResponse>())!;
+        var otherClient = _factory.CreateClient();
+        otherClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", otherTokens.AccessToken);
+        var ok = await HardenedAuthApiFactory.SendAsync(otherClient, HttpMethod.Post, "/v1/account/password",
+            new { currentPassword = "Wrong-Password-Entirely-9", newPassword = "Brand-New-Account-Password-2" }, "127.0.0.1", ClientIp());
+        Assert.Equal(HttpStatusCode.Forbidden, ok.StatusCode);
+    }
 }

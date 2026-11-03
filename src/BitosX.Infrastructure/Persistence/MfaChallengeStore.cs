@@ -44,17 +44,24 @@ public sealed class MfaChallengeStore : IMfaChallengeStore
         return rows == 1;
     }
 
-    public async Task RecordFailedAttemptAsync(Guid challengeId, int maxAttempts, DateTime nowUtc, CancellationToken cancellationToken = default)
+    public async Task<bool> TryReserveAttemptAsync(Guid challengeId, int maxAttempts, DateTime nowUtc, CancellationToken cancellationToken = default)
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-        // Two statements, so the limit check never depends on the engine's SET evaluation order.
-        await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE mfa_challenges SET attempt_count = attempt_count + 1 WHERE id = @challengeId AND consumed_at IS NULL;",
-            new { challengeId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        // One statement: InnoDB evaluates the WHERE under the row's exclusive lock, so two concurrent reservations
+        // serialize on the row and the count can never pass the limit.
+        var rows = await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE mfa_challenges SET attempt_count = attempt_count + 1
+            WHERE id = @challengeId AND consumed_at IS NULL AND expires_at > @nowUtc AND attempt_count < @maxAttempts;
+            """, new { challengeId, maxAttempts, nowUtc }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        return rows == 1;
+    }
+
+    public async Task CloseIfAttemptsExhaustedAsync(Guid challengeId, int maxAttempts, DateTime nowUtc, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await connection.ExecuteAsync(new CommandDefinition(
             "UPDATE mfa_challenges SET consumed_at = @nowUtc WHERE id = @challengeId AND consumed_at IS NULL AND attempt_count >= @maxAttempts;",
-            new { challengeId, maxAttempts, nowUtc }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
-        await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+            new { challengeId, maxAttempts, nowUtc }, cancellationToken: cancellationToken)).ConfigureAwait(false);
     }
 }

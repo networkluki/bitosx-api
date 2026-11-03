@@ -117,6 +117,23 @@ public sealed class AuthEndpointsTests : IClassFixture<AuthApiFactory>, IAsyncLi
         // Not verified.
         Assert.Equal(1L, await _factory.QueryScalarAsync<long>(
             "SELECT COUNT(*) FROM accounts WHERE normalized_email=@e AND email_verified_at IS NULL", "@e", email.ToUpperInvariant()));
+
+        // And the challenge really is still usable: the same token with a valid password verifies the account.
+        var retry = await client.PostAsJsonAsync("/v1/auth/verify-email", new { token, password = "a-valid-password-12" });
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
+        Assert.Equal(1L, await _factory.QueryScalarAsync<long>(
+            "SELECT COUNT(*) FROM accounts WHERE normalized_email=@e AND email_verified_at IS NOT NULL", "@e", email.ToUpperInvariant()));
+    }
+
+    [Theory]
+    [InlineData("{\"password\":\"a-valid-password-12\"}")]
+    [InlineData("{\"token\":null,\"password\":\"a-valid-password-12\"}")]
+    [InlineData("{\"token\":\"\",\"password\":\"a-valid-password-12\"}")]
+    public async Task Verify_MissingOrNullToken_Returns400_Not500(string body)
+    {
+        var resp = await _factory.CreateClient().PostAsync("/v1/auth/verify-email", new StringContent(body, System.Text.Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        Assert.Contains("Invalid or expired verification token.", await resp.Content.ReadAsStringAsync());
     }
 
     [Fact]
@@ -147,9 +164,22 @@ public sealed class AuthEndpointsTests : IClassFixture<AuthApiFactory>, IAsyncLi
         await DispatchOnceAsync();
         var token = CapturingEmailSender.ExtractToken(_factory.Emails.Sent[0]);
 
-        // No challenge row's token_hash equals the raw token bytes.
-        var matches = await _factory.QueryScalarAsync<long>(
-            "SELECT COUNT(*) FROM email_verification_challenges WHERE token_hash = @t", "@t", System.Text.Encoding.UTF8.GetBytes(token));
-        Assert.Equal(0L, matches);
+        // The stored token_hash is exactly HMAC-SHA256(pepper, decoded 32 token bytes), computed independently here,
+        // and it is neither the raw token bytes, nor their plain SHA-256, nor the token text.
+        var raw = Convert.FromBase64String(token.Replace('-', '+').Replace('_', '/') + new string('=', (4 - token.Length % 4) % 4));
+        Assert.Equal(32, raw.Length);
+        var pepper = _factory.Services.GetRequiredService<BitosX.Application.Verification.EmailVerificationSecurityOptions>().Pepper;
+        var expected = System.Security.Cryptography.HMACSHA256.HashData(System.Text.Encoding.UTF8.GetBytes(pepper), raw);
+
+        var accountId = await _factory.QueryScalarAsync<Guid>("SELECT id FROM accounts WHERE normalized_email=@e", "@e", email.ToUpperInvariant());
+        Assert.Equal(1L, await _factory.QueryScalarAsync<long>(
+            "SELECT COUNT(*) FROM email_verification_challenges WHERE account_id = @a", "@a", accountId));
+        Assert.Equal(1L, await _factory.QueryScalarAsync<long>(
+            "SELECT COUNT(*) FROM email_verification_challenges WHERE token_hash = @t", "@t", expected));
+        foreach (var forbidden in new[] { raw, System.Security.Cryptography.SHA256.HashData(raw), System.Text.Encoding.UTF8.GetBytes(token) })
+        {
+            Assert.Equal(0L, await _factory.QueryScalarAsync<long>(
+                "SELECT COUNT(*) FROM email_verification_challenges WHERE token_hash = @t", "@t", forbidden));
+        }
     }
 }

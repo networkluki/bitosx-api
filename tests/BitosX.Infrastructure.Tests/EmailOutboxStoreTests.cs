@@ -101,4 +101,58 @@ public sealed class EmailOutboxStoreTests
         Assert.True(deleted >= 1);
         Assert.Equal(0, await ScalarAsync<long>("SELECT COUNT(*) FROM email_outbox WHERE id=@id", new { id = r.OutboxId }));
     }
+
+    [Fact]
+    public async Task ALongestAllowedNonAsciiAddress_FitsThePayloadColumn()
+    {
+        // 320 UTF-16 units, almost all non-ASCII: the default JSON encoder escapes each as \uXXXX (6 bytes),
+        // about 2.1 KB of plaintext; the old VARBINARY(512) column refused the insert (a 500 at registration).
+        var domain = "@example.com";
+        var local = new string('é', Application.Accounts.EmailAddressValidator.MaxLength - domain.Length);
+        var email = local + domain;
+        Assert.True(Application.Accounts.EmailAddressValidator.IsValid(email));
+
+        var r = await _ctx.RegisterAsync(AccountsTestContext.NowMicro(), emailAddress: email);
+
+        var size = await ScalarAsync<long>("SELECT LENGTH(payload_ciphertext) FROM email_outbox WHERE id=@id", new { id = r.OutboxId });
+        Assert.True(size > 512, $"payload was {size} bytes");
+        Assert.True(size <= 4096);
+    }
+
+    [Fact]
+    public async Task RenewLease_OnlyForTheOwningWorker_AndOnlyWhileNonTerminal()
+    {
+        await _fixture.ResetAsync();
+        var now = AccountsTestContext.NowMicro();
+        var r = await _ctx.RegisterAsync(now);
+        await _ctx.OutboxStore.ClaimDueAsync(now, now.AddSeconds(5), "worker-1", 10);
+
+        Assert.True(await _ctx.OutboxStore.RenewLeaseAsync(r.OutboxId, "worker-1", now.AddMinutes(2)));
+        Assert.Equal(1, await ScalarAsync<long>("SELECT COUNT(*) FROM email_outbox WHERE id=@id AND locked_until=@t", new { id = r.OutboxId, t = now.AddMinutes(2) }));
+        Assert.False(await _ctx.OutboxStore.RenewLeaseAsync(r.OutboxId, "worker-2", now.AddMinutes(3)));
+
+        await _ctx.OutboxStore.MarkSentAndErasePayloadAsync(r.OutboxId, now);
+        Assert.False(await _ctx.OutboxStore.RenewLeaseAsync(r.OutboxId, "worker-1", now.AddMinutes(3)));
+    }
+
+    [Fact]
+    public async Task Cleanup_WorksInBatches_AndLeavesActiveRowsAlone()
+    {
+        await _fixture.ResetAsync();
+        var now = AccountsTestContext.NowMicro();
+        var old = new List<Guid>();
+        for (var i = 0; i < 3; i++)
+        {
+            var r = await _ctx.RegisterAsync(now.AddDays(-10), ttl: TimeSpan.FromMinutes(30));
+            old.Add(r.OutboxId);
+        }
+
+        var active = await _ctx.RegisterAsync(now, ttl: TimeSpan.FromMinutes(30));
+
+        // Old rows' challenges expired long ago: the sweep fails + erases them, then retention deletes them.
+        Assert.Equal(3, await _ctx.OutboxStore.FailAndEraseIneligibleAsync(now));
+        Assert.Equal(3, await _ctx.OutboxStore.DeleteSanitizedOlderThanAsync(now.AddDays(-7)));
+        Assert.Equal(0, await ScalarAsync<long>("SELECT COUNT(*) FROM email_outbox WHERE id IN @old", new { old }));
+        Assert.Equal(1, await ScalarAsync<long>("SELECT COUNT(*) FROM email_outbox WHERE id=@id AND failed_at IS NULL AND payload_ciphertext IS NOT NULL", new { id = active.OutboxId }));
+    }
 }

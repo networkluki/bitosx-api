@@ -16,17 +16,66 @@ Status legend:
 
 ---
 
+## Deploy procedure (every release)
+
+1. **Apply migrations first** (required — nothing else runs them). With the new build, before the web
+   host is restarted:
+
+   ```bash
+   ASPNETCORE_ENVIRONMENT=Production dotnet BitosX.Api.dll migrate
+   ```
+
+   It reads `ConnectionStrings:BitosxMigrator` (the schema-management account, from the secret store /
+   environment, e.g. `ConnectionStrings__BitosxMigrator`) through the same configuration sources as the
+   web host, applies every pending migration in order, prints the applied ids, and exits — `0` success,
+   `1` a migration failed (the message names the script; DDL commits implicitly, so inspect that script's
+   tables before running again), `2` the connection string is missing. It never starts the web host.
+   Concurrent runs are serialized by an advisory lock. **The web host never needs the migrator secret**:
+   do not put `ConnectionStrings:BitosxMigrator` into the service's environment.
+2. Restart the web host (it uses only the DML runtime account `ConnectionStrings:Bitosx`).
+3. Run the verification commands at the end of this document.
+
+Phase 8 adds migrations 0006 (envelope `LONGBLOB`, revision tombstones), 0007 (binary collation for
+`normalized_email` and `password_hash`) and 0008 (outbox payload size, per-account recovery-code
+uniqueness, housekeeping indexes). All are online `ALTER TABLE`s on small tables except `vault_blobs`
+(0006 rewrites it; schedule the migration in a quiet minute if many vaults are stored).
+
+## Configuration added in phase 8
+
+| Key | Default | Notes |
+|---|---|---|
+| `Email:PublicBaseUrl` | (none) | **Required** when EmailVerification is enabled: absolute `https://` origin of the web app, e.g. `https://vault.bitosx.se`. Startup fails otherwise (`http://localhost` only in Development/Testing). Not a secret. |
+| `Security:Cors:StatusPageOrigins` | `https://bitosx.se` (appsettings.json) | Origins that may read only `GET /health` and `GET /version`. |
+| `Security:PublicExposureHardening:PasswordChangePerAccount` | 5 / 1 / 180 s | `TokenLimit` / `TokensPerPeriod` / `ReplenishmentSeconds`, validated. |
+| `Security:PublicExposureHardening:MfaPerAccount` | 10 / 2 / 60 s | Second sign-in step per account, validated. |
+| `Housekeeping:Enabled` | `true` | Background pruning of dead challenges and sessions. |
+| `Housekeeping:IntervalMinutes` | 60 | 1..1440. |
+| `Housekeeping:RetentionDays` | 30 | 1..3650: how long dead rows are kept. |
+| `Housekeeping:BatchSize` | 200 | 1..5000 rows per DELETE. |
+| `Housekeeping:MaxBatchesPerRun` | 50 | 1..1000 batches per table per run. |
+| `Email:Outbox:*` | unchanged | Now validated: `MaxAttempts` 1..100, `BatchSize` 1..500, `PollInterval` 1 s..1 h, `LeaseDuration` (0, 1 h], `BackoffBase` (0, 1 h], `RetentionPeriod` 1 h..365 d. |
+| `Email:AttemptTimeoutSeconds` | 30 | Now actually applied to the SMTP sender (before, only validated). |
+| `ConnectionStrings:BitosxMigrator` | (none) | Read **only** by `migrate`; never by the web host. |
+
 ## Application-enforced (code)
 
-- **[app] Production hardening gate** — in the Production environment, `LoginEnabled` **requires**
-  `Security:PublicExposureHardening:Enabled = true`, or startup fails
-  (`ProductionExposureValidation`). Development/Test may run with it disabled.
+- **[app] Production hardening gate** — in the Production environment, `LoginEnabled` **or**
+  `EmailVerificationEnabled` **requires** `Security:PublicExposureHardening:Enabled = true`, or startup
+  fails (`ProductionExposureValidation`; forgot/reset-password and their limiters ride on
+  EmailVerification alone). Development/Test may run with it disabled.
+- **[app] Email link base** — with EmailVerification enabled, `Email:PublicBaseUrl` must be an absolute
+  `https://` origin or startup fails, so no email can ever carry a relative, dead link.
 - **[app] Bounded Argon2 work admission** — always active (independent of hardening): 2 executing + 4
   FIFO-queued, 2 s acquire timeout; overload → generic 503 (`Retry-After: 1`), never a credential 401.
 - **[app] Login/refresh rate limits** — per-IP + per-normalized-email (login) and per-IP (refresh);
   generic 429; memory-bounded partitions that never reset a live limiter.
 - **[app] Process-wide login budget** — one token bucket after the per-IP/per-email limiters; generic 429.
-- **[app] Login-response jitter** — 25–75 ms on normal 200/401 outcomes only.
+- **[app] Rate limits on every other public or credential-confirming route** — forgot/reset-password
+  per IP and per email, second sign-in step per IP and per account, envelope writes, account deletion,
+  password change and TOTP management per account. The envelope write limiter runs before the body is read.
+- **[app] Login-response jitter** — 25–75 ms after credential evaluation (200, 401, 202 second factor
+  required, 503 two-factor unavailable). It does not hide the Argon2 cost; see SECURITY_MODEL
+  "Anti-enumeration: what holds".
 - **[app] Trusted forwarded-header policy** — one hop of `X-Forwarded-For`/`-Proto`, loopback proxy only;
   `KnownProxies`/`KnownIPNetworks` are not cleared; `CF-Connecting-IP` is never read in-process; an
   `X-Forwarded-For` from a non-loopback peer is never honored.
@@ -46,8 +95,9 @@ Status legend:
 - **[repo] Host filtering** — `appsettings.json` → `AllowedHosts = 127.0.0.1;localhost;api.bitosx.se`
   (ASP.NET Core Host Filtering is enabled by default and consumes this). `X-Forwarded-Host` is not trusted.
 - **[repo] CORS allowlist** — `appsettings.json` → `Security:Cors:AllowedOrigins = https://vault.bitosx.se`
-  (exact https origin, validated fail-closed; empty disables CORS). Methods/headers are fixed in code and
-  credentials are never allowed. See SECURITY_MODEL — "Browser clients (CORS)".
+  (methods GET/POST/PUT/DELETE) and `Security:Cors:StatusPageOrigins = https://bitosx.se` (GET /health and
+  GET /version only). Exact https origins, validated fail-closed; both empty disables CORS. Methods/headers
+  are fixed in code and credentials are never allowed. See SECURITY_MODEL — "Browser clients (CORS)".
 - **[repo] No committed secrets** — `appsettings*.json` and templates contain no JWT signing key, DB
   credentials, refresh tokens, passwords, Cloudflare tokens, origin private keys, or SMTP credentials;
   secrets come from user-secrets / production injection only.
@@ -81,8 +131,14 @@ These are **not** verifiable from this repository. Each is a blocker until confi
 - **[host] MariaDB `max_allowed_packet`** — at least `32M` (`/etc/mysql/mariadb.conf.d/*.cnf`, `[mysqld]`
   section), so a 16 MiB encrypted envelope (`/v1/sync/envelope`) can be written in one statement. Below
   that an upload fails as a server error; nothing is partially written.
-- **[host] Secrets supplied outside source control** — JWT signing key(s), DB credentials, SMTP/outbox
-  keys, and the TOTP key (`Security:TotpKey`, Base64 of 32 random bytes, e.g.
+- **[host] MariaDB `binlog_format`** — if binary logging is enabled it must be `MIXED` (the MariaDB
+  default) or `ROW`, not `STATEMENT`: several write transactions run under READ COMMITTED (to avoid
+  gap-lock deadlocks), which statement-based binary logging refuses.
+- **[host] Migrator account** — the schema-management account (`ConnectionStrings:BitosxMigrator`, DDL on
+  `bitosx.*`) is used only by `migrate` during a deploy; the runtime account (`ConnectionStrings:Bitosx`)
+  keeps DML only (it needs `DELETE` for housekeeping).
+- **[host] Secrets supplied outside source control** — JWT signing key(s), DB credentials (runtime and,
+  for `migrate` only, migrator), SMTP/outbox keys, and the TOTP key (`Security:TotpKey`, Base64 of 32 random bytes, e.g.
   `openssl rand -base64 32`) provided via a secret store / environment, never committed. Without
   `Security:TotpKey` two-factor enrollment is unavailable and any account that already has TOTP is
   refused at login (fail closed); rotating the key invalidates every stored TOTP secret and recovery
@@ -91,8 +147,8 @@ These are **not** verifiable from this repository. Each is a blocker until confi
 ## Deferred (separate future decisions — not in Phase 2D)
 
 - Adaptive Cloudflare Turnstile / CAPTCHA.
-- Registration / resend / verify-email / password-reset rate-limit policies and a global outbound-email
-  budget (no dead endpoint code is added for these).
+- Registration / resend / verify-email rate-limit policies and a global outbound-email budget (no dead
+  endpoint code is added for these).
 - Any production interactive OpenAPI/Swagger exposure.
 
 ---
@@ -117,6 +173,18 @@ curl -si https://api.bitosx.se/openapi/v1.json | head -n 1
 
 # Health is reachable through the proxy chain (expect 200):
 curl -si https://api.bitosx.se/health | head -n 1
+
+# The product page may read /health (expect Access-Control-Allow-Origin: https://bitosx.se):
+curl -si https://api.bitosx.se/health -H 'Origin: https://bitosx.se' | grep -i access-control-allow-origin
+
+# ...but nothing else (expect no Access-Control-* headers):
+curl -si -X OPTIONS https://api.bitosx.se/v1/auth/login \
+  -H 'Origin: https://bitosx.se' -H 'Access-Control-Request-Method: POST' | grep -i access-control
+
+# The web vault's envelope upload passes its preflight (expect PUT in Access-Control-Allow-Methods):
+curl -si -X OPTIONS https://api.bitosx.se/v1/sync/envelope \
+  -H 'Origin: https://vault.bitosx.se' -H 'Access-Control-Request-Method: PUT' \
+  -H 'Access-Control-Request-Headers: content-type,authorization' | grep -i access-control-allow-methods
 
 # CORS: a preflight from the web account app is answered (expect 204 and
 # Access-Control-Allow-Origin: https://vault.bitosx.se, no Allow-Credentials):

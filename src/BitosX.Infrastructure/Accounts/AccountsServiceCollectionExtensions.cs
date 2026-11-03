@@ -10,6 +10,7 @@ using BitosX.Infrastructure.Persistence;
 using BitosX.Infrastructure.Security;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 
 namespace BitosX.Infrastructure.Accounts;
@@ -260,12 +261,37 @@ public static class AccountsServiceCollectionExtensions
             throw new InvalidOperationException("EmailDelivery enabled but Email:SmtpPort must be 587 (STARTTLS).");
         }
 
+        var outbox = BindOutboxOptions(configuration);
+        ValidateDeliveryTimeouts(outbox, BuildSmtpOptions(configuration));
+    }
+
+    /// <summary>Binds and validates <c>Email:Outbox</c> (fail closed on out-of-range values).</summary>
+    private static EmailOutboxOptions BindOutboxOptions(IConfiguration configuration)
+    {
         var outbox = new EmailOutboxOptions();
-        configuration.GetSection("Email:Outbox").Bind(outbox);
-        var smtp = new SmtpOptions();
+        configuration.GetSection(EmailOutboxOptions.SectionName).Bind(outbox);
+        outbox.Validate();
+        return outbox;
+    }
+
+    /// <summary>The SMTP settings exactly as the sender will use them (validated against the outbox lease).</summary>
+    private static SmtpOptions BuildSmtpOptions(IConfiguration configuration)
+    {
+        var smtp = new SmtpOptions
+        {
+            Host = configuration["Email:SmtpHost"] ?? "smtp.gmail.com",
+            Port = configuration.GetValue("Email:SmtpPort", 587),
+            Username = configuration["Email:SmtpUsername"] ?? string.Empty,
+            AppPassword = configuration["Email:SmtpAppPassword"] ?? string.Empty,
+        };
         var attemptSeconds = configuration.GetValue<int?>("Email:AttemptTimeoutSeconds");
-        if (attemptSeconds is > 0) smtp.AttemptTimeout = TimeSpan.FromSeconds(attemptSeconds.Value);
-        ValidateDeliveryTimeouts(outbox, smtp);
+        if (attemptSeconds is not null)
+        {
+            if (attemptSeconds <= 0) throw new InvalidOperationException("Email:AttemptTimeoutSeconds must be a positive number of seconds.");
+            smtp.AttemptTimeout = TimeSpan.FromSeconds(attemptSeconds.Value);
+        }
+
+        return smtp;
     }
 
     // ---- AccountCore: DB-backed password hashing (no SMTP dependency) ----
@@ -281,6 +307,10 @@ public static class AccountsServiceCollectionExtensions
         var admission = new Argon2AdmissionOptions();
         configuration.GetSection(Argon2AdmissionOptions.SectionName).Bind(admission);
         admission.Validate();
+
+        // The memory budget per verification (192 MiB / MaxConcurrency) must reflect how many hashes really run
+        // at once, which is the admission gate's MaxConcurrent (default 2), not the legacy MaxConcurrency (1).
+        argon2.MaxConcurrency = Math.Max(argon2.MaxConcurrency, admission.MaxConcurrent);
 
         services.AddSingleton(argon2);
         services.AddSingleton(admission);
@@ -352,9 +382,20 @@ public static class AccountsServiceCollectionExtensions
         services.AddScoped<ISessionManagementService, SessionManagementService>();
         services.AddScoped<ISessionAuthenticator, SessionAuthenticator>();
 
-        // Account deletion is an authenticated operation (password-confirmed), so it is composed with Login.
+        // Second-factor confirmation for password-confirmed account operations. Needs only the TOTP store; the
+        // code verifier exists only with the Totp capability (registered by AddBitosxTotp), and without it an
+        // account with TOTP confirmed is refused, never let through on the password alone.
+        services.AddScoped<ISecondFactorConfirmation>(sp =>
+            new SecondFactorConfirmation(sp.GetRequiredService<ITotpStore>(), sp.GetService<MfaCodeVerifier>()));
+
+        // Account deletion is an authenticated operation (password-confirmed, plus the second factor when TOTP
+        // is confirmed), so it is composed with Login.
         services.AddSingleton<IAccountDeletionStore>(_ => new AccountDeletionStore(connectionFactory));
         services.AddScoped<IAccountDeletionService, AccountDeletionService>();
+
+        // Password change while signed in (same confirmation as deletion; revokes every other session).
+        services.AddSingleton<IAccountPasswordStore>(sp => new AccountPasswordStore(connectionFactory, sp.GetRequiredService<TimeProvider>()));
+        services.AddScoped<IPasswordChangeService, PasswordChangeService>();
 
         return services;
     }
@@ -377,6 +418,9 @@ public static class AccountsServiceCollectionExtensions
 
         services.AddSingleton<ITotpCrypto>(crypto);
         services.AddScoped<MfaCodeVerifier>();
+        // The HTTP host registers its hardened per-account limiter first; any other host admits every attempt
+        // (the per-challenge attempt limit still applies).
+        services.TryAddSingleton<IMfaAttemptLimiter, UnlimitedMfaAttempts>();
         services.AddScoped<IMfaLoginService, MfaLoginService>();
         services.AddScoped<ITotpEnrollmentService, TotpEnrollmentService>();
         return services;
@@ -384,8 +428,14 @@ public static class AccountsServiceCollectionExtensions
 
     // ---- EmailVerification: register/verify/resend + outbox persistence (no SMTP send) ----
 
+    /// <param name="services">The service collection.</param>
+    /// <param name="configuration">The configuration.</param>
+    /// <param name="runtimeConnectionString">The DML-only runtime connection string.</param>
+    /// <param name="allowLoopbackHttpBaseUrl">
+    /// Accept an <c>http://</c> loopback <c>Email:PublicBaseUrl</c> (Development/Testing only); otherwise it must be https.
+    /// </param>
     public static IServiceCollection AddBitosxEmailVerification(
-        this IServiceCollection services, IConfiguration configuration, string runtimeConnectionString)
+        this IServiceCollection services, IConfiguration configuration, string runtimeConnectionString, bool allowLoopbackHttpBaseUrl = false)
     {
         // Fail closed on malformed verification secrets (present-but-invalid).
         var verification = new EmailVerificationSecurityOptions
@@ -399,8 +449,9 @@ public static class AccountsServiceCollectionExtensions
         var outboxCrypto = new EmailOutboxCryptoOptions { Key = configuration["Security:EmailOutboxKey"] ?? string.Empty };
         var email = new EmailOptions();
         configuration.GetSection("Email").Bind(email);
-        var outbox = new EmailOutboxOptions();
-        configuration.GetSection("Email:Outbox").Bind(outbox);
+        // Every verification and reset link is built from it: refuse to start rather than mail dead links.
+        email.ValidatePublicBaseUrl(allowLoopbackHttpBaseUrl);
+        var outbox = BindOutboxOptions(configuration);
 
         // Construct crypto primitives eagerly so a malformed pepper/outbox key throws NOW.
         var tokenFactory = new HmacEmailVerificationTokenFactory(verification);
@@ -436,15 +487,10 @@ public static class AccountsServiceCollectionExtensions
     public static IServiceCollection AddBitosxEmailDelivery(
         this IServiceCollection services, IConfiguration configuration)
     {
-        var smtp = new SmtpOptions
-        {
-            Host = configuration["Email:SmtpHost"] ?? "smtp.gmail.com",
-            Port = configuration.GetValue("Email:SmtpPort", 587),
-            Username = configuration["Email:SmtpUsername"] ?? string.Empty,
-            AppPassword = configuration["Email:SmtpAppPassword"] ?? string.Empty,
-        };
-        var outbox = new EmailOutboxOptions();
-        configuration.GetSection("Email:Outbox").Bind(outbox);
+        // The overall attempt deadline (Email:AttemptTimeoutSeconds) is applied here too — before, it was only
+        // validated, and the sender always used the 30 s default.
+        var smtp = BuildSmtpOptions(configuration);
+        var outbox = BindOutboxOptions(configuration);
 
         // Fail closed on malformed delivery configuration (present-but-invalid).
         if (smtp.Port != 587) throw new InvalidOperationException("Email:SmtpPort must be 587 (STARTTLS) for EmailDelivery.");
@@ -459,7 +505,10 @@ public static class AccountsServiceCollectionExtensions
         return services;
     }
 
-    /// <summary>Enforces LeaseDuration &gt; SMTP AttemptTimeout + margin (fail closed).</summary>
+    /// <summary>
+    /// Enforces LeaseDuration &gt; SMTP AttemptTimeout + margin (fail closed). The dispatcher renews the lease for
+    /// each row right before its send, so one bounded attempt always finishes inside its own lease.
+    /// </summary>
     public static void ValidateDeliveryTimeouts(EmailOutboxOptions outbox, SmtpOptions smtp)
     {
         if (outbox.LeaseDuration <= smtp.AttemptTimeout + DeliveryTimeoutSafetyMargin)

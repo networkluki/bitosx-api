@@ -7,6 +7,12 @@ namespace BitosX.Infrastructure.Persistence;
 /// <summary>Dapper-backed <see cref="IEmailOutboxStore"/> over MariaDB.</summary>
 public sealed class EmailOutboxStore : IEmailOutboxStore
 {
+    /// <summary>Rows per statement for the sweep and the retention delete (short transactions, small lock sets).</summary>
+    internal const int CleanupBatchSize = 500;
+
+    /// <summary>Upper bound on batches per cleanup call, so one call never runs unbounded.</summary>
+    internal const int MaxCleanupBatches = 20;
+
     private readonly BitosxConnectionFactory _connectionFactory;
 
     public EmailOutboxStore(BitosxConnectionFactory connectionFactory)
@@ -77,6 +83,17 @@ public sealed class EmailOutboxStore : IEmailOutboxStore
             """, new { outboxId }, cancellationToken: cancellationToken)).ConfigureAwait(false);
     }
 
+    public async Task<bool> RenewLeaseAsync(Guid id, string workerId, DateTime leaseUntil, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        var rows = await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE email_outbox SET locked_until = @leaseUntil
+            WHERE id = @id AND locked_by = @workerId AND sent_at IS NULL AND failed_at IS NULL;
+            """, new { id, workerId, leaseUntil }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        return rows == 1;
+    }
+
     public Task MarkSentAndErasePayloadAsync(Guid id, DateTime nowUtc, CancellationToken cancellationToken = default)
         => ExecuteAsync(
             """
@@ -106,29 +123,72 @@ public sealed class EmailOutboxStore : IEmailOutboxStore
             WHERE id = @id AND sent_at IS NULL AND failed_at IS NULL;
             """, new { id, availableAtUtc, nowUtc }, cancellationToken);
 
+    /// <summary>
+    /// Two steps so the sweep never locks a challenge row: a plain (non-locking, consistent) read finds pending
+    /// rows whose challenge is no longer active, then an UPDATE of email_outbox alone, by primary key, re-checks
+    /// that each row is still non-terminal. A challenge that stopped being active never becomes active again,
+    /// so the read cannot go stale in the unsafe direction. Request paths lock challenge → outbox; this path
+    /// locks only outbox rows, so the two can no longer wait on each other in opposite orders.
+    /// </summary>
     public async Task<int> FailAndEraseIneligibleAsync(DateTime nowUtc, CancellationToken cancellationToken = default)
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        return await connection.ExecuteAsync(new CommandDefinition(
-            """
-            UPDATE email_outbox o
-            JOIN email_verification_challenges c ON c.id = o.challenge_id
-            SET o.failed_at = @nowUtc,
-                o.payload_nonce = NULL, o.payload_ciphertext = NULL, o.payload_tag = NULL,
-                o.locked_until = NULL, o.locked_by = NULL
-            WHERE o.sent_at IS NULL AND o.failed_at IS NULL
-              AND (c.consumed_at IS NOT NULL OR c.invalidated_at IS NOT NULL OR c.expires_at <= @nowUtc);
-            """, new { nowUtc }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        var total = 0;
+        for (var batch = 0; batch < MaxCleanupBatches; batch++)
+        {
+            var ids = (await connection.QueryAsync<Guid>(new CommandDefinition(
+                """
+                SELECT o.id FROM email_outbox o
+                JOIN email_verification_challenges c ON c.id = o.challenge_id
+                WHERE o.sent_at IS NULL AND o.failed_at IS NULL
+                  AND (c.consumed_at IS NOT NULL OR c.invalidated_at IS NOT NULL OR c.expires_at <= @nowUtc)
+                LIMIT @limit;
+                """, new { nowUtc, limit = CleanupBatchSize }, cancellationToken: cancellationToken)).ConfigureAwait(false)).AsList();
+            if (ids.Count == 0)
+            {
+                break;
+            }
+
+            total += await connection.ExecuteAsync(new CommandDefinition(
+                """
+                UPDATE email_outbox
+                SET failed_at = @nowUtc,
+                    payload_nonce = NULL, payload_ciphertext = NULL, payload_tag = NULL,
+                    locked_until = NULL, locked_by = NULL
+                WHERE id IN @ids AND sent_at IS NULL AND failed_at IS NULL;
+                """, new { nowUtc, ids }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+            if (ids.Count < CleanupBatchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
     }
 
+    /// <summary>Batched by the created_at index (migration 0008): short statements, never a full-table scan.</summary>
     public async Task<int> DeleteSanitizedOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default)
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        return await connection.ExecuteAsync(new CommandDefinition(
-            """
-            DELETE FROM email_outbox
-            WHERE (sent_at IS NOT NULL OR failed_at IS NOT NULL) AND created_at < @cutoffUtc;
-            """, new { cutoffUtc }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        var total = 0;
+        for (var batch = 0; batch < MaxCleanupBatches; batch++)
+        {
+            var rows = await connection.ExecuteAsync(new CommandDefinition(
+                """
+                DELETE FROM email_outbox
+                WHERE created_at < @cutoffUtc AND (sent_at IS NOT NULL OR failed_at IS NOT NULL)
+                ORDER BY created_at
+                LIMIT @limit;
+                """, new { cutoffUtc, limit = CleanupBatchSize }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            total += rows;
+            if (rows < CleanupBatchSize)
+            {
+                break;
+            }
+        }
+
+        return total;
     }
 
     private async Task ExecuteAsync(string sql, object param, CancellationToken cancellationToken)

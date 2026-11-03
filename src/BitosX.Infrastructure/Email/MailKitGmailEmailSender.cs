@@ -75,12 +75,14 @@ public sealed class MailKitGmailEmailSender : IEmailSender
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("Verification email delivery timed out (attempt deadline exceeded).");
+            _logger.LogWarning("Email delivery timed out (attempt deadline exceeded).");
             return EmailSendResult.Failed;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            _logger.LogWarning("Verification email delivery failed (SMTP error).");
+            // The exception TYPE (e.g. AuthenticationException, SmtpCommandException) makes SMTP failures
+            // diagnosable; the message is not logged (it can echo addresses or server text).
+            _logger.LogWarning("Email delivery failed (SMTP error: {ErrorType}).", ex.GetType().Name);
             return EmailSendResult.Failed;
         }
     }

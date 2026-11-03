@@ -35,6 +35,13 @@ public interface IEmailOutboxStore
     Task<IReadOnlyList<OutboxDueRow>> ClaimDueAsync(
         DateTime nowUtc, DateTime leaseUntil, string workerId, int batchSize, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Renews this worker's lease on one claimed row right before its send (<c>locked_until = leaseUntil</c>),
+    /// iff the row is still non-terminal and still leased by <paramref name="workerId"/>. False means another
+    /// worker took the row over (its lease had expired) or it reached a terminal state: do not send it.
+    /// </summary>
+    Task<bool> RenewLeaseAsync(Guid id, string workerId, DateTime leaseUntil, CancellationToken cancellationToken = default);
+
     /// <summary>Marks sent and erases the encrypted payload columns; clears the lease.</summary>
     Task MarkSentAndErasePayloadAsync(Guid id, DateTime nowUtc, CancellationToken cancellationToken = default);
 
@@ -47,6 +54,6 @@ public interface IEmailOutboxStore
     /// <summary>Marks-failed + erases payloads of unsent rows whose challenge is no longer active (≤24h cleanup).</summary>
     Task<int> FailAndEraseIneligibleAsync(DateTime nowUtc, CancellationToken cancellationToken = default);
 
-    /// <summary>Deletes terminal (sent/failed) rows older than the cutoff (metadata retention).</summary>
+    /// <summary>Deletes terminal (sent/failed) rows older than the cutoff (metadata retention), in bounded batches.</summary>
     Task<int> DeleteSanitizedOlderThanAsync(DateTime cutoffUtc, CancellationToken cancellationToken = default);
 }

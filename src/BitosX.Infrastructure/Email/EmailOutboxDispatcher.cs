@@ -32,6 +32,9 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
     private readonly ILogger<EmailOutboxDispatcher> _logger;
     private readonly string _workerId = $"outbox-{Guid.NewGuid():N}";
 
+    /// <summary>This dispatcher's lease owner id (<c>locked_by</c>); a send needs the row leased by it.</summary>
+    public string WorkerId => _workerId;
+
     public EmailOutboxDispatcher(
         IEmailOutboxStore store,
         IOutboxPayloadProtector protector,
@@ -111,7 +114,16 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
             return false;
         }
 
-        // (4) Compose + send.
+        // (4) Renew the lease for THIS row right before its send: the batch was claimed with one lease, and earlier
+        // sends may have used most of it. A lease that already passed to another worker means: do not send.
+        // LeaseDuration > AttemptTimeout + margin is validated at startup, so this send ends inside its lease.
+        if (!await _store.RenewLeaseAsync(row.Id, _workerId, now + _options.LeaseDuration, cancellationToken).ConfigureAwait(false))
+        {
+            _logger.LogInformation("Outbox message {OutboxId} is no longer leased by this worker; not sending.", row.Id);
+            return false;
+        }
+
+        // (5) Compose + send.
         var expiresInMinutes = Math.Max(1, (int)Math.Ceiling((payload.ExpiresAtUtc - now).TotalMinutes));
         EmailMessage email;
         switch (row.MessageType)
@@ -137,7 +149,10 @@ public sealed class EmailOutboxDispatcher : IEmailOutboxDispatcher
             return true;
         }
 
-        // (5) Transient failure: retry with bounded exponential backoff + jitter, but only
+        _logger.LogWarning(
+            "Outbox message {OutboxId} ({MessageType}) delivery attempt {Attempt} failed.", row.Id, row.MessageType, row.AttemptCount + 1);
+
+        // (6) Transient failure: retry with bounded exponential backoff + jitter, but only
         // if the next attempt is still within the token lifetime; otherwise fail terminally
         // (never extend the TTL). state.ChallengeExpiresAt is the fresh authoritative expiry.
         var nextAttempt = row.AttemptCount + 1;

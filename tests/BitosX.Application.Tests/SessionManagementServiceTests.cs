@@ -87,6 +87,20 @@ public sealed class SessionManagementServiceTests
     }
 
     [Fact]
+    public async Task List_NeverReturnsMoreThan200_EvenIfTheStoreDoes()
+    {
+        var (svc, store) = Build();
+        store.ListResult = Enumerable.Range(0, 250)
+            .Select(i => new SessionListRow(Guid.NewGuid(), Now.AddMinutes(-i), Now, Now.AddDays(1)))
+            .ToList();
+
+        var items = await svc.ListSessionsAsync(Account, Current);
+
+        Assert.Equal(SessionListLimits.MaxListedSessions, items.Count);
+        Assert.Equal(Now, items[0].CreatedAt); // the store's order (newest first) is kept
+    }
+
+    [Fact]
     public async Task Cancellation_Propagates_ForEachOperation()
     {
         var (svc, _) = Build();

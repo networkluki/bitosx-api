@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading.RateLimiting;
 using BitosX.Application.Accounts;
+using BitosX.Application.Mfa;
 using BitosX.Contracts.Accounts;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -30,8 +31,14 @@ public sealed class AuthRateLimiters : IDisposable
     /// <summary>Account deletion attempts, partitioned by the authenticated account id.</summary>
     public BoundedRateLimiterCache AccountDeletePerAccount { get; }
 
+    /// <summary>Password change while signed in, partitioned by the authenticated account id.</summary>
+    public BoundedRateLimiterCache PasswordChangePerAccount { get; }
+
     /// <summary>Second sign-in step, partitioned by trusted client IP.</summary>
     public BoundedRateLimiterCache MfaPerIp { get; }
+
+    /// <summary>Second sign-in step, partitioned by the account the challenge token resolves to.</summary>
+    public BoundedRateLimiterCache MfaPerAccount { get; }
 
     /// <summary>TOTP management, partitioned by the authenticated account id.</summary>
     public BoundedRateLimiterCache TotpManagePerAccount { get; }
@@ -49,7 +56,9 @@ public sealed class AuthRateLimiters : IDisposable
         PasswordResetPerIp = new BoundedRateLimiterCache(options.PasswordResetPerIp, options.PartitionState.MaxIpPartitions, idle, clock);
         PasswordResetPerEmail = new BoundedRateLimiterCache(options.PasswordResetPerEmail, options.PartitionState.MaxEmailPartitions, idle, clock);
         AccountDeletePerAccount = new BoundedRateLimiterCache(options.AccountDeletePerAccount, options.PartitionState.MaxEmailPartitions, idle, clock);
+        PasswordChangePerAccount = new BoundedRateLimiterCache(options.PasswordChangePerAccount, options.PartitionState.MaxEmailPartitions, idle, clock);
         MfaPerIp = new BoundedRateLimiterCache(options.MfaPerIp, options.PartitionState.MaxIpPartitions, idle, clock);
+        MfaPerAccount = new BoundedRateLimiterCache(options.MfaPerAccount, options.PartitionState.MaxEmailPartitions, idle, clock);
         TotpManagePerAccount = new BoundedRateLimiterCache(options.TotpManagePerAccount, options.PartitionState.MaxEmailPartitions, idle, clock);
         GlobalLoginBudget = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
         {
@@ -71,7 +80,9 @@ public sealed class AuthRateLimiters : IDisposable
         PasswordResetPerIp.Dispose();
         PasswordResetPerEmail.Dispose();
         AccountDeletePerAccount.Dispose();
+        PasswordChangePerAccount.Dispose();
         MfaPerIp.Dispose();
+        MfaPerAccount.Dispose();
         TotpManagePerAccount.Dispose();
         GlobalLoginBudget.Dispose();
     }
@@ -97,6 +108,8 @@ public static class AuthRateLimiting
         services.TryAddSingleton(TimeProvider.System);
         // Jitter is always registered but no-ops when hardening is disabled (the endpoint always resolves it).
         services.AddSingleton<ILoginResponseJitter, LoginResponseJitter>();
+        // Per-account bound on the second sign-in step (no-op when hardening is disabled).
+        services.AddSingleton<IMfaAttemptLimiter, MfaAccountAttemptLimiter>();
         if (options.Enabled)
         {
             services.AddSingleton<AuthRateLimiters>();
@@ -154,14 +167,6 @@ public static class AuthRateLimiting
         }
     }
 
-    /// <summary>
-    /// Per-account limit on envelope writes (upload, delete). The partition key is the account id from the
-    /// validated JWT (<c>sub</c>), which the server issued — never anything the client typed. Inert unless
-    /// hardening is enabled, like the other limiters; an unexpected failure fails closed with 503.
-    /// </summary>
-    public static async ValueTask<object?> SyncWritePerAccountFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
-        => await PerAccountAsync(context, next, static r => r.SyncWritePerAccount);
-
     /// <summary>Per-account limit on TOTP management calls (same keying as the sync write limiter).</summary>
     public static async ValueTask<object?> TotpManagePerAccountFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
         => await PerAccountAsync(context, next, static r => r.TotpManagePerAccount);
@@ -169,6 +174,10 @@ public static class AuthRateLimiting
     /// <summary>Per-account limit on password-confirmed account deletion attempts (same keying as the sync write limiter).</summary>
     public static async ValueTask<object?> AccountDeletePerAccountFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
         => await PerAccountAsync(context, next, static r => r.AccountDeletePerAccount);
+
+    /// <summary>Per-account limit on password changes while signed in (same keying as the sync write limiter).</summary>
+    public static async ValueTask<object?> PasswordChangePerAccountFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+        => await PerAccountAsync(context, next, static r => r.PasswordChangePerAccount);
 
     private static async ValueTask<object?> PerAccountAsync(
         EndpointFilterInvocationContext context, EndpointFilterDelegate next, Func<AuthRateLimiters, BoundedRateLimiterCache> select)

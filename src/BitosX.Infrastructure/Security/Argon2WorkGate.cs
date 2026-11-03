@@ -5,7 +5,7 @@ namespace BitosX.Infrastructure.Security;
 
 /// <summary>
 /// Bounded admission gate for Argon2 work, shared process-wide by every production Argon2 operation
-/// (login verify today; future registration / password-change / reset go through the same hasher, so no
+/// (login, verify-email, password reset, password change, account deletion and TOTP management all go through the same hasher, so no
 /// unbounded alternate path can appear). Built on <see cref="ConcurrencyLimiter"/> (a BCL primitive):
 ///
 /// <list type="bullet">

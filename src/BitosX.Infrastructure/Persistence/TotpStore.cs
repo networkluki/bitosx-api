@@ -30,7 +30,18 @@ public sealed class TotpStore : ITotpStore
     public async Task<TotpPendingOutcome> StorePendingAsync(Guid accountId, ProtectedTotpSecret secret, DateTime nowUtc, CancellationToken cancellationToken = default)
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        // READ COMMITTED + the account row lock first (canonical order accounts → account_totp): the locking read
+        // on a missing account_totp row takes no gap lock, so first enrollments of different accounts cannot
+        // deadlock on each other's insert, and two enrollments of one account serialize on the account row.
+        await using var tx = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false);
+
+        var accountExists = await connection.ExecuteScalarAsync<int?>(new CommandDefinition(
+            "SELECT 1 FROM accounts WHERE id = @accountId FOR UPDATE;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        if (accountExists is null)
+        {
+            await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException("The account does not exist.");
+        }
 
         var confirmed = await connection.QuerySingleOrDefaultAsync<DateTime?>(new CommandDefinition(
             "SELECT confirmed_at FROM account_totp WHERE account_id = @accountId FOR UPDATE;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
@@ -65,14 +76,20 @@ public sealed class TotpStore : ITotpStore
         return TotpPendingOutcome.Stored;
     }
 
-    public async Task<TotpConfirmOutcome> ConfirmAsync(Guid accountId, long usedStep, IReadOnlyList<byte[]> recoveryCodeVerifiers, DateTime nowUtc, CancellationToken cancellationToken = default)
+    public async Task<TotpConfirmOutcome> ConfirmAsync(Guid accountId, byte[] expectedSecretNonce, long usedStep, IReadOnlyList<byte[]> recoveryCodeVerifiers, DateTime nowUtc, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(expectedSecretNonce);
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
+        // Bound to the secret the code was checked against: a re-enrollment in between replaced the secret (and
+        // its random nonce), and confirming would otherwise activate a secret the user's app never saw.
         var rows = await connection.ExecuteAsync(new CommandDefinition(
-            "UPDATE account_totp SET confirmed_at = @nowUtc, last_used_step = @usedStep WHERE account_id = @accountId AND confirmed_at IS NULL;",
-            new { accountId, usedStep, nowUtc }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            """
+            UPDATE account_totp SET confirmed_at = @nowUtc, last_used_step = @usedStep
+            WHERE account_id = @accountId AND confirmed_at IS NULL AND secret_nonce = @expectedSecretNonce;
+            """,
+            new { accountId, expectedSecretNonce, usedStep, nowUtc }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
         if (rows != 1)
         {
             await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
@@ -93,6 +110,14 @@ public sealed class TotpStore : ITotpStore
             WHERE account_id = @accountId AND confirmed_at IS NOT NULL AND (last_used_step IS NULL OR last_used_step < @step);
             """, new { accountId, step }, cancellationToken: cancellationToken)).ConfigureAwait(false);
         return rows == 1;
+    }
+
+    public async Task<bool> HasUnusedRecoveryCodeAsync(Guid accountId, byte[] verifier, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        return await connection.ExecuteScalarAsync<long>(new CommandDefinition(
+            "SELECT COUNT(*) FROM account_recovery_codes WHERE account_id = @accountId AND code_hash = @verifier AND used_at IS NULL;",
+            new { accountId, verifier }, cancellationToken: cancellationToken)).ConfigureAwait(false) > 0;
     }
 
     public async Task<bool> TryConsumeRecoveryCodeAsync(Guid accountId, byte[] verifier, DateTime nowUtc, CancellationToken cancellationToken = default)
@@ -135,6 +160,9 @@ public sealed class TotpStore : ITotpStore
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        // Same lock order as confirm and regenerate: the account_totp row first, then the recovery codes.
+        await connection.ExecuteAsync(new CommandDefinition(
+            "SELECT account_id FROM account_totp WHERE account_id = @accountId FOR UPDATE;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM account_recovery_codes WHERE account_id = @accountId;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM mfa_challenges WHERE account_id = @accountId;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM account_totp WHERE account_id = @accountId;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);

@@ -48,7 +48,9 @@ public sealed class EmailOutboxResendCoordinationTests
         var r = await _ctx.RegisterAsync(now);
 
         // Dispatcher claims A and holds a live lease.
-        var claimed = await _ctx.OutboxStore.ClaimDueAsync(now, now.AddMinutes(1), "worker-1", 10);
+        var sender = new FakeEmailSender();
+        var dispatcher = Dispatcher(sender, new FakeTimeProvider(now));
+        var claimed = await _ctx.OutboxStore.ClaimDueAsync(now, now.AddMinutes(1), dispatcher.WorkerId, 10);
         Assert.Single(claimed);
 
         // Resend while delivery is in flight → must not invalidate / create B.
@@ -62,8 +64,7 @@ public sealed class EmailOutboxResendCoordinationTests
         Assert.Equal(1L, await ScalarAsync<long>("SELECT COUNT(*) FROM email_verification_challenges WHERE account_id=@a", new { a = r.AccountId }));
 
         // Dispatcher may now safely deliver A.
-        var sender = new FakeEmailSender();
-        var sent = await Dispatcher(sender, new FakeTimeProvider(now)).TryDeliverClaimedRowAsync(claimed[0]);
+        var sent = await dispatcher.TryDeliverClaimedRowAsync(claimed[0]);
         Assert.True(sent);
         Assert.Single(sender.Sent);
     }
