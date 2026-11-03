@@ -37,6 +37,41 @@ public sealed class MfaRateLimitTests : IClassFixture<HardenedAuthApiFactory>, I
     }
 
     [Fact]
+    public async Task PasswordlessPasskey_PerAddress_OptionsAndAssertionShareTheBudget()
+    {
+        var ip = ClientIp();
+        var client = _factory.CreateClient();
+        for (var i = 0; i < 10; i++)
+        {
+            Assert.Equal(HttpStatusCode.OK, (await HardenedAuthApiFactory.SendAsync(client, HttpMethod.Post, "/v1/auth/passkey/options", null, "127.0.0.1", ip)).StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, (await HardenedAuthApiFactory.SendAsync(client, HttpMethod.Post, "/v1/auth/passkey", new { assertionId = new string('A', 43), credential = new { } }, "127.0.0.1", ip)).StatusCode);
+        }
+
+        var limited = await HardenedAuthApiFactory.SendAsync(client, HttpMethod.Post, "/v1/auth/passkey/options", null, "127.0.0.1", ip);
+        Assert.Equal(HttpStatusCode.TooManyRequests, limited.StatusCode);
+        Assert.NotNull(limited.Headers.RetryAfter);
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await HardenedAuthApiFactory.SendAsync(client, HttpMethod.Post, "/v1/auth/passkey", new { assertionId = "x" }, "127.0.0.1", ip)).StatusCode);
+
+        // Another address has its own budget; without a usable client address the request is refused (fail closed).
+        Assert.Equal(HttpStatusCode.OK, (await HardenedAuthApiFactory.SendAsync(client, HttpMethod.Post, "/v1/auth/passkey/options", null, "127.0.0.1", ClientIp())).StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await HardenedAuthApiFactory.SendAsync(client, HttpMethod.Post, "/v1/auth/passkey/options", null, "127.0.0.1")).StatusCode);
+    }
+
+    [Fact]
+    public async Task LoginPasskey_SharesThePerIpBudgetOfTheSecondStep()
+    {
+        var ip = ClientIp();
+        var client = _factory.CreateClient();
+        for (var i = 0; i < 5; i++)
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, (await HardenedAuthApiFactory.SendAsync(client, HttpMethod.Post, "/v1/auth/login/passkey/options", new { mfaToken = new string('A', 43) }, "127.0.0.1", ip)).StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, (await HardenedAuthApiFactory.SendAsync(client, HttpMethod.Post, "/v1/auth/login/passkey", new { mfaToken = new string('A', 43), credential = new { } }, "127.0.0.1", ip)).StatusCode);
+        }
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await HardenedAuthApiFactory.SendAsync(client, HttpMethod.Post, "/v1/auth/login/totp", new { mfaToken = new string('A', 43), code = "123456" }, "127.0.0.1", ip)).StatusCode);
+    }
+
+    [Fact]
     public async Task TotpManage_PerAccount_EleventhIsLimited()
     {
         var email = await _factory.CreateVerifiedAccountAsync(ValidPassword);

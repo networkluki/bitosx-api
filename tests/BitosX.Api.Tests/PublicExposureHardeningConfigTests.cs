@@ -66,7 +66,14 @@ public sealed class PublicExposureHardeningConfigTests
         Assert.Equal(5, o.PasswordChangePerAccount.TokenLimit);
         Assert.Equal(1, o.PasswordChangePerAccount.TokensPerPeriod);
         Assert.Equal(180, o.PasswordChangePerAccount.ReplenishmentSeconds);
+        Assert.Equal(20, o.PasskeyPerAddress.TokenLimit);
+        Assert.Equal(10, o.PasskeyPerAddress.TokensPerPeriod);
+        Assert.Equal(60, o.PasskeyPerAddress.ReplenishmentSeconds);
     }
+
+    [Fact] public void PasskeyPerAddress_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasskeyPerAddress:TokenLimit"] = "0" }));
+    [Fact] public void PasskeyPerAddress_TokensPerPeriodExceedsLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasskeyPerAddress:TokensPerPeriod"] = "999" }));
+    [Fact] public void PasskeyPerAddress_ZeroReplenishment_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasskeyPerAddress:ReplenishmentSeconds"] = "0" }));
 
     [Fact] public void PasswordChangePerAccount_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasswordChangePerAccount:TokenLimit"] = "0" }));
     [Fact] public void PasswordChangePerAccount_TokensPerPeriodExceedsLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasswordChangePerAccount:TokensPerPeriod"] = "999" }));
