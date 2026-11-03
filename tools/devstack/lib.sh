@@ -209,8 +209,13 @@ devstack_db_sql() {
     if [[ -z "${DB_SQL_DEFAULTS}" ]]; then
         DB_SQL_DEFAULTS="$(mktemp "${STATE_DIR}/sql-defaults.XXXXXX")"
         chmod 600 "${DB_SQL_DEFAULTS}"
-        printf '[client]\nuser=%s\npassword=%s\nhost=%s\nport=%s\nprotocol=TCP\n' \
-            "${DB_ROOT_USER}" "${DB_ROOT_PASSWORD}" "${DB_HOST}" "${DB_PORT}" >"${DB_SQL_DEFAULTS}"
+        # Option-file values are parsed: an unquoted '#' starts a comment and quotes are removed, so a
+        # generated password with symbols (the MariaDB image's random root password has them) would be cut.
+        # The value is written double-quoted with '\' and '"' escaped, which both clients read back verbatim.
+        local quoted_password="${DB_ROOT_PASSWORD//\\/\\\\}"
+        quoted_password="${quoted_password//\"/\\\"}"
+        printf '[client]\nuser=%s\npassword="%s"\nhost=%s\nport=%s\nprotocol=TCP\n' \
+            "${DB_ROOT_USER}" "${quoted_password}" "${DB_HOST}" "${DB_PORT}" >"${DB_SQL_DEFAULTS}"
     fi
     "${client}" --defaults-extra-file="${DB_SQL_DEFAULTS}" --batch --skip-column-names
 }
