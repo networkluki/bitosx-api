@@ -207,4 +207,55 @@ public sealed class EmailOutboxDispatcherTests
         Assert.Single(sender.Sent);
         Assert.Equal(1, await ScalarAsync<long>("SELECT COUNT(*) FROM email_verification_challenges WHERE id=@id", new { id = r.ChallengeId })); // no 2nd challenge
     }
+
+    [Fact]
+    public async Task ARowWhoseLeasePassedToAnotherWorker_IsNotSent()
+    {
+        await _fixture.ResetAsync();
+        var now = AccountsTestContext.NowMicro();
+        await _ctx.RegisterAsync(now);
+        var sender = new FakeEmailSender();
+        var clock = new FakeTimeProvider(now);
+        var dispatcher = Dispatcher(sender, clock);
+
+        // This worker claimed the batch, then spent longer than the lease on earlier rows: another worker took it.
+        var claimed = await _ctx.OutboxStore.ClaimDueAsync(now, now.AddSeconds(5), dispatcher.WorkerId, 10);
+        Assert.Single(await _ctx.OutboxStore.ClaimDueAsync(now.AddSeconds(10), now.AddMinutes(2), "worker-2", 10));
+        clock.SetUtcNow(now.AddSeconds(10));
+
+        Assert.False(await dispatcher.TryDeliverClaimedRowAsync(claimed[0]));
+        Assert.Empty(sender.Sent); // never two concurrent sends of one row
+    }
+
+    [Fact]
+    public async Task EachSend_HoldsAFreshLease_EvenLateInABatch()
+    {
+        await _fixture.ResetAsync();
+        var now = AccountsTestContext.NowMicro();
+        var r = await _ctx.RegisterAsync(now);
+        var clock = new FakeTimeProvider(now);
+        var probe = new LeaseProbeSender(_fixture, r.OutboxId);
+        var options = new EmailOutboxOptions();
+        var composer = new VerificationEmailComposer(new EmailOptions { FromAddress = "b@x.io", PublicBaseUrl = "https://vault.bitosx.se" });
+        var dispatcher = new EmailOutboxDispatcher(_ctx.OutboxStore, _ctx.Protector, probe, composer,
+            options, new DefaultEmailRetryBackoff(options, () => 0.5), clock, NullLogger<EmailOutboxDispatcher>.Instance);
+
+        var claimed = await _ctx.OutboxStore.ClaimDueAsync(now, now.AddSeconds(5), dispatcher.WorkerId, 10);
+        clock.SetUtcNow(now.AddMinutes(10)); // the batch lease is long gone when this row's turn comes
+
+        Assert.True(await dispatcher.TryDeliverClaimedRowAsync(claimed[0]));
+        Assert.Equal(now.AddMinutes(10) + options.LeaseDuration, probe.LockedUntilDuringSend); // renewed right before the send
+    }
+
+    private sealed class LeaseProbeSender(DatabaseFixture fixture, Guid outboxId) : IEmailSender
+    {
+        public DateTime? LockedUntilDuringSend { get; private set; }
+
+        public async Task<EmailSendResult> SendAsync(EmailMessage message, CancellationToken ct = default)
+        {
+            await using var c = await fixture.ConnectionFactory.OpenConnectionAsync(ct);
+            LockedUntilDuringSend = await c.ExecuteScalarAsync<DateTime?>(new CommandDefinition("SELECT locked_until FROM email_outbox WHERE id=@outboxId", new { outboxId }, cancellationToken: ct));
+            return EmailSendResult.Sent;
+        }
+    }
 }

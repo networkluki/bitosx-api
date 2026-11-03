@@ -208,6 +208,40 @@ public sealed class CapabilityGatingTests
         Assert.Throws<InvalidOperationException>(() => new ServiceCollection().AddBitosxEmailVerification(cfg, DummyConn, allowLoopbackHttpBaseUrl: false));
     }
 
+    [Theory]
+    [InlineData("Email:Outbox:PollInterval", "00:00:00")]
+    [InlineData("Email:Outbox:BatchSize", "0")]
+    [InlineData("Email:Outbox:MaxAttempts", "0")]
+    public void OutboxOptions_OutOfRange_FailClosed_InEveryCompositionPath(string key, string value)
+    {
+        var cfg = new ConfigurationBuilder().AddConfiguration(Config())
+            .AddInMemoryCollection(new Dictionary<string, string?> { [key] = value }).Build();
+        Assert.Throws<InvalidOperationException>(() => AccountsServiceCollectionExtensions.DetectCapabilities(cfg));
+        Assert.Throws<InvalidOperationException>(() => new ServiceCollection().AddBitosxEmailVerification(cfg, DummyConn));
+        Assert.Throws<InvalidOperationException>(() => new ServiceCollection().AddBitosxEmailDelivery(cfg));
+    }
+
+    [Fact]
+    public void EmailDelivery_AppliesTheConfiguredAttemptTimeout()
+    {
+        var cfg = new ConfigurationBuilder().AddConfiguration(Config())
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Email:AttemptTimeoutSeconds"] = "45" }).Build();
+        var s = new ServiceCollection();
+        s.AddBitosxEmailDelivery(cfg);
+        var smtp = (SmtpOptions)s.Single(d => d.ServiceType == typeof(SmtpOptions)).ImplementationInstance!;
+        Assert.Equal(TimeSpan.FromSeconds(45), smtp.AttemptTimeout);
+    }
+
+    [Fact]
+    public void AccountCore_DerivesTheArgon2MemoryBudget_FromTheAdmissionGatesRealConcurrency()
+    {
+        var s = new ServiceCollection();
+        s.AddBitosxAccountCore(Config());
+        var argon2 = (Argon2ParametersOptions)s.Single(d => d.ServiceType == typeof(Argon2ParametersOptions)).ImplementationInstance!;
+        Assert.Equal(2, argon2.MaxConcurrency); // the gate runs 2 hashes at once by default
+        Assert.Equal(Argon2ParametersOptions.MemoryBudgetKiB / 2, argon2.EffectiveMaxVerifyMemoryKiB());
+    }
+
     [Fact]
     public void EmailVerification_MalformedOutboxKey_FailsClosed()
     {

@@ -54,8 +54,8 @@ public sealed class TotpStoreTests
         Assert.False(await _store.ReplaceRecoveryCodesAsync(a, Verifiers(3), now));
 
         var codes = Verifiers(10);
-        Assert.Equal(TotpConfirmOutcome.Confirmed, await _store.ConfirmAsync(a, 100, codes, now));
-        Assert.Equal(TotpConfirmOutcome.NotPending, await _store.ConfirmAsync(a, 101, Verifiers(10), now));
+        Assert.Equal(TotpConfirmOutcome.Confirmed, await _store.ConfirmAsync(a, second.Nonce, 100, codes, now));
+        Assert.Equal(TotpConfirmOutcome.NotPending, await _store.ConfirmAsync(a, second.Nonce, 101, Verifiers(10), now));
         Assert.Equal(TotpPendingOutcome.AlreadyConfirmed, await _store.StorePendingAsync(a, Secret(), now));
         var confirmed = await _store.GetAsync(a);
         Assert.True(confirmed!.IsConfirmed);
@@ -125,8 +125,9 @@ public sealed class TotpStoreTests
         var now = AccountsTestContext.NowMicro();
         var r = await _ctx.RegisterAsync(now);
         var codes = Verifiers(5);
-        Assert.Equal(TotpPendingOutcome.Stored, await _store.StorePendingAsync(r.AccountId, Secret(), now));
-        Assert.Equal(TotpConfirmOutcome.Confirmed, await _store.ConfirmAsync(r.AccountId, 1, codes, now));
+        var pendingSecret = Secret();
+        Assert.Equal(TotpPendingOutcome.Stored, await _store.StorePendingAsync(r.AccountId, pendingSecret, now));
+        Assert.Equal(TotpConfirmOutcome.Confirmed, await _store.ConfirmAsync(r.AccountId, pendingSecret.Nonce, 1, codes, now));
 
         Assert.True(await _store.HasUnusedRecoveryCodeAsync(r.AccountId, codes[0]));
         Assert.True(await _store.HasUnusedRecoveryCodeAsync(r.AccountId, codes[0]));
@@ -136,13 +137,49 @@ public sealed class TotpStoreTests
     }
 
     [Fact]
+    public async Task Confirm_IsBoundToThePendingSecret_AReEnrollmentInBetweenWins()
+    {
+        var now = AccountsTestContext.NowMicro();
+        var r = await _ctx.RegisterAsync(now);
+        var checkedAgainst = Secret();
+        Assert.Equal(TotpPendingOutcome.Stored, await _store.StorePendingAsync(r.AccountId, checkedAgainst, now));
+        var replacement = Secret(); // a second "enroll" replaces the secret after the code was checked
+        Assert.Equal(TotpPendingOutcome.Stored, await _store.StorePendingAsync(r.AccountId, replacement, now));
+
+        Assert.Equal(TotpConfirmOutcome.NotPending, await _store.ConfirmAsync(r.AccountId, checkedAgainst.Nonce, 1, Verifiers(5), now));
+        Assert.False((await _store.GetAsync(r.AccountId))!.IsConfirmed);
+        Assert.Equal(0, await _store.CountUnusedRecoveryCodesAsync(r.AccountId));
+        Assert.Equal(TotpConfirmOutcome.Confirmed, await _store.ConfirmAsync(r.AccountId, replacement.Nonce, 1, Verifiers(5), now));
+    }
+
+    [Fact]
+    public async Task RecoveryCodeVerifiers_AreUniquePerAccount_NotGlobally()
+    {
+        var now = AccountsTestContext.NowMicro();
+        var a = await _ctx.RegisterAsync(now);
+        var b = await _ctx.RegisterAsync(now);
+        var shared = RandomNumberGenerator.GetBytes(32); // the same code drawn by two accounts
+        foreach (var account in new[] { a.AccountId, b.AccountId })
+        {
+            var secret = Secret();
+            Assert.Equal(TotpPendingOutcome.Stored, await _store.StorePendingAsync(account, secret, now));
+            Assert.Equal(TotpConfirmOutcome.Confirmed, await _store.ConfirmAsync(account, secret.Nonce, 1, [shared, .. Verifiers(4)], now));
+        }
+
+        Assert.True(await _store.TryConsumeRecoveryCodeAsync(a.AccountId, shared, now));
+        Assert.True(await _store.TryConsumeRecoveryCodeAsync(b.AccountId, shared, now)); // each account's own copy
+        await Assert.ThrowsAsync<MySqlConnector.MySqlException>(() => _store.ReplaceRecoveryCodesAsync(a.AccountId, [shared, shared], now)); // still unique within one account
+    }
+
+    [Fact]
     public async Task DeletingTheAccount_CascadesEverything()
     {
         await _fixture.ResetAsync();
         var now = AccountsTestContext.NowMicro();
         var r = await _ctx.RegisterAsync(now);
-        Assert.Equal(TotpPendingOutcome.Stored, await _store.StorePendingAsync(r.AccountId, Secret(), now));
-        Assert.Equal(TotpConfirmOutcome.Confirmed, await _store.ConfirmAsync(r.AccountId, 1, Verifiers(5), now));
+        var pendingSecret = Secret();
+        Assert.Equal(TotpPendingOutcome.Stored, await _store.StorePendingAsync(r.AccountId, pendingSecret, now));
+        Assert.Equal(TotpConfirmOutcome.Confirmed, await _store.ConfirmAsync(r.AccountId, pendingSecret.Nonce, 1, Verifiers(5), now));
         await _challenges.CreateAsync(new MfaChallenge(Guid.NewGuid(), r.AccountId, RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32), "ua", now, now.AddMinutes(5)));
 
         await using (var c = await _fixture.ConnectionFactory.OpenConnectionAsync())

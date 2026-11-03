@@ -9,6 +9,7 @@ using BitosX.Api.Http;
 using BitosX.Api.Security;
 using BitosX.Application.Versioning;
 using BitosX.Infrastructure.Accounts;
+using BitosX.Infrastructure.Housekeeping;
 using BitosX.Infrastructure.Persistence;
 using BitosX.Infrastructure.Security;
 using BitosX.Infrastructure.Sync;
@@ -68,7 +69,8 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 });
 
 // ---- Kestrel: conservative request-body-size limit ----
-// No current endpoint accepts a body; future endpoints can raise this locally.
+// Every endpoint keeps this cap except the envelope upload, which MaxRequestBodySizeMiddleware raises per
+// endpoint (from VaultSyncOptions); the auth/account endpoints additionally refuse a declared body over 4 KiB.
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.Limits.MaxRequestBodySize = 64 * 1024; // 64 KB
@@ -103,8 +105,7 @@ builder.Services.AddSingleton<IProductVersionProvider>(
     _ => new AssemblyProductVersionProvider(Assembly.GetExecutingAssembly()));
 
 // Persistence is wired only when a connection string is configured (from a
-// local secret store, never committed). It stays absent for the loopback
-// health/version foundation, and no auth/account behavior is exposed yet.
+// local secret store, never committed); without it only /health and /version exist.
 // Capability-based composition (detected once). AccountCore is independent of SMTP;
 // EmailVerification adds register/verify/resend + outbox; EmailDelivery adds the SMTP
 // sender + dispatcher. A missing optional capability disables only itself.
@@ -122,6 +123,9 @@ if (capabilities.AccountCoreEnabled)
     // `migrate` command with the separate migrator account, which the web host never reads.
     builder.Services.AddBitosxPersistence(bitosxConnectionString!);
     builder.Services.AddBitosxAccountCore(builder.Configuration);
+
+    // Background pruning of dead challenges and sessions after a retention window (Housekeeping:*, validated).
+    builder.Services.AddBitosxHousekeeping(builder.Configuration, bitosxConnectionString!);
 
     // Phase 2D.1: bind + validate public-exposure hardening (fail-closed) and register the auth rate
     // limiters. Inert unless Security:PublicExposureHardening:Enabled is true. Composed with AccountCore
@@ -220,9 +224,6 @@ if (app.Environment.IsDevelopment())
 
 // Unversioned infrastructure endpoints (/health, /version), readable cross-origin by the status page.
 app.MapInfrastructureEndpoints(corsOptions.StatusPolicyEnabled ? BrowserCorsOptions.StatusPolicyName : null);
-
-// Future versioned business API surface (currently empty).
-app.MapApiV1();
 
 // Auth endpoints are exposed when EmailVerification is available. register/resend/forgot-password
 // return a generic 503 when EmailDelivery is unavailable (routes stay mapped); verify-email and

@@ -46,9 +46,9 @@ internal sealed class AccountsTestContext
     public sealed record Registered(Guid AccountId, Guid ChallengeId, Guid OutboxId, string Email, string Token, byte[] Verifier);
 
     /// <summary>Registers a fresh unverified account (+challenge+outbox) and returns handles.</summary>
-    public async Task<Registered> RegisterAsync(DateTime nowUtc, TimeSpan? ttl = null)
+    public async Task<Registered> RegisterAsync(DateTime nowUtc, TimeSpan? ttl = null, string? emailAddress = null)
     {
-        var email = $"user-{Guid.NewGuid():N}@example.com";
+        var email = emailAddress ?? $"user-{Guid.NewGuid():N}@example.com";
         var normalized = EmailNormalizer.Normalize(email);
         var accountId = Guid.NewGuid();
         var challengeId = Guid.NewGuid();

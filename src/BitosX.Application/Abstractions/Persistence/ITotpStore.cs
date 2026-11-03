@@ -33,10 +33,12 @@ public interface ITotpStore
     Task<TotpPendingOutcome> StorePendingAsync(Guid accountId, ProtectedTotpSecret secret, DateTime nowUtc, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// FOR UPDATE the pending row, mark it confirmed with <paramref name="usedStep"/> as the first used step,
-    /// and replace the account's recovery codes with <paramref name="recoveryCodeVerifiers"/> — one transaction.
+    /// Mark the pending row confirmed with <paramref name="usedStep"/> as the first used step — only if it still
+    /// holds the secret the code was checked against (<paramref name="expectedSecretNonce"/>; a concurrent
+    /// re-enrollment replaces the secret and its nonce) — and replace the account's recovery codes with
+    /// <paramref name="recoveryCodeVerifiers"/>, in one transaction. NotPending when the row changed meanwhile.
     /// </summary>
-    Task<TotpConfirmOutcome> ConfirmAsync(Guid accountId, long usedStep, IReadOnlyList<byte[]> recoveryCodeVerifiers, DateTime nowUtc, CancellationToken cancellationToken = default);
+    Task<TotpConfirmOutcome> ConfirmAsync(Guid accountId, byte[] expectedSecretNonce, long usedStep, IReadOnlyList<byte[]> recoveryCodeVerifiers, DateTime nowUtc, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Replay guard: records <paramref name="step"/> as used iff TOTP is confirmed and the step is above the last

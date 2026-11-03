@@ -9,7 +9,8 @@ namespace BitosX.Infrastructure.Persistence;
 /// Dapper-backed <see cref="IPasswordResetStore"/> over MariaDB. Every query is bound to
 /// <c>purpose = 'password_reset'</c> and to an account that can sign in (verified, password set, not
 /// disabled), so an email-verification token can never reset a password and a reset token can never
-/// activate an account. Lock order matches <see cref="SessionStore"/>: accounts → sessions → refresh_tokens.
+/// activate an account. Every transaction locks in the canonical order accounts → email_verification_challenges
+/// (→ email_outbox) → sessions → refresh_tokens, the same as <see cref="SessionStore"/> and account deletion.
 /// </summary>
 public sealed class PasswordResetStore : IPasswordResetStore
 {
@@ -128,10 +129,24 @@ public sealed class PasswordResetStore : IPasswordResetStore
         byte[] verifierHash, string passwordHashPhc, CancellationToken cancellationToken = default)
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-        // Lock challenge + account without an expiry predicate; expiry is decided against the
-        // authoritative time read after the lock is held.
+        // Canonical lock order accounts → challenges → sessions → refresh_tokens: a non-locking locator finds
+        // the account, which is locked before the challenge (a locking join driven by the token hash would lock
+        // the challenge first, the reverse of issuing and deletion).
+        var accountId = await connection.ExecuteScalarAsync<Guid?>(new CommandDefinition(
+            "SELECT account_id FROM email_verification_challenges WHERE token_hash = @verifierHash AND purpose = @purpose LIMIT 1;",
+            new { verifierHash, purpose = ChallengePurposes.PasswordReset }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        if (accountId is null)
+        {
+            return PasswordResetOutcome.InvalidOrExpired;
+        }
+
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        await connection.ExecuteAsync(new CommandDefinition(
+            "SELECT id FROM accounts WHERE id = @accountId FOR UPDATE;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        // Lock the challenge (the account row is already held) without an expiry predicate; expiry is decided
+        // against the authoritative time read after the lock is held.
         var row = await connection.QuerySingleOrDefaultAsync<FinalizeRow>(
             new CommandDefinition(
                 $"""
@@ -139,12 +154,13 @@ public sealed class PasswordResetStore : IPasswordResetStore
                 FROM email_verification_challenges c
                 JOIN accounts a ON a.id = c.account_id
                 WHERE c.token_hash = @verifierHash
+                  AND c.account_id = @accountId
                   AND c.purpose = @purpose
                   AND c.consumed_at IS NULL
                   AND c.invalidated_at IS NULL
                   AND {EligibleAccount}
                 FOR UPDATE;
-                """, new { verifierHash, purpose = ChallengePurposes.PasswordReset }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+                """, new { verifierHash, accountId, purpose = ChallengePurposes.PasswordReset }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         if (row is null)
         {

@@ -36,9 +36,10 @@ public sealed class EmailOutboxBackgroundService : BackgroundService
             {
                 break;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                _logger.LogWarning("Email outbox dispatch cycle failed; will retry next interval.");
+                // The type only: an exception message could carry an address or driver detail.
+                _logger.LogWarning("Email outbox dispatch cycle failed ({ErrorType}); will retry next interval.", ex.GetType().Name);
             }
 
             try

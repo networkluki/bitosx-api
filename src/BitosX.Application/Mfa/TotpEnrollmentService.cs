@@ -140,7 +140,8 @@ public sealed class TotpEnrollmentService : ITotpEnrollmentService
         }
 
         var codes = GenerateRecoveryCodes();
-        var outcome = await _store.ConfirmAsync(accountId, step, Verifiers(codes), _clock.GetUtcNow().UtcDateTime, cancellationToken).ConfigureAwait(false);
+        // Bound to the pending secret the code matched: a re-enrollment in between makes this NotPending.
+        var outcome = await _store.ConfirmAsync(accountId, enrollment.Secret.Nonce, step, Verifiers(codes), _clock.GetUtcNow().UtcDateTime, cancellationToken).ConfigureAwait(false);
         return outcome == TotpConfirmOutcome.Confirmed
             ? new TotpConfirmation(TotpConfirmResult.Confirmed, codes)
             : new TotpConfirmation(TotpConfirmResult.NotPending, []);

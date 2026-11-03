@@ -261,12 +261,37 @@ public static class AccountsServiceCollectionExtensions
             throw new InvalidOperationException("EmailDelivery enabled but Email:SmtpPort must be 587 (STARTTLS).");
         }
 
+        var outbox = BindOutboxOptions(configuration);
+        ValidateDeliveryTimeouts(outbox, BuildSmtpOptions(configuration));
+    }
+
+    /// <summary>Binds and validates <c>Email:Outbox</c> (fail closed on out-of-range values).</summary>
+    private static EmailOutboxOptions BindOutboxOptions(IConfiguration configuration)
+    {
         var outbox = new EmailOutboxOptions();
-        configuration.GetSection("Email:Outbox").Bind(outbox);
-        var smtp = new SmtpOptions();
+        configuration.GetSection(EmailOutboxOptions.SectionName).Bind(outbox);
+        outbox.Validate();
+        return outbox;
+    }
+
+    /// <summary>The SMTP settings exactly as the sender will use them (validated against the outbox lease).</summary>
+    private static SmtpOptions BuildSmtpOptions(IConfiguration configuration)
+    {
+        var smtp = new SmtpOptions
+        {
+            Host = configuration["Email:SmtpHost"] ?? "smtp.gmail.com",
+            Port = configuration.GetValue("Email:SmtpPort", 587),
+            Username = configuration["Email:SmtpUsername"] ?? string.Empty,
+            AppPassword = configuration["Email:SmtpAppPassword"] ?? string.Empty,
+        };
         var attemptSeconds = configuration.GetValue<int?>("Email:AttemptTimeoutSeconds");
-        if (attemptSeconds is > 0) smtp.AttemptTimeout = TimeSpan.FromSeconds(attemptSeconds.Value);
-        ValidateDeliveryTimeouts(outbox, smtp);
+        if (attemptSeconds is not null)
+        {
+            if (attemptSeconds <= 0) throw new InvalidOperationException("Email:AttemptTimeoutSeconds must be a positive number of seconds.");
+            smtp.AttemptTimeout = TimeSpan.FromSeconds(attemptSeconds.Value);
+        }
+
+        return smtp;
     }
 
     // ---- AccountCore: DB-backed password hashing (no SMTP dependency) ----
@@ -282,6 +307,10 @@ public static class AccountsServiceCollectionExtensions
         var admission = new Argon2AdmissionOptions();
         configuration.GetSection(Argon2AdmissionOptions.SectionName).Bind(admission);
         admission.Validate();
+
+        // The memory budget per verification (192 MiB / MaxConcurrency) must reflect how many hashes really run
+        // at once, which is the admission gate's MaxConcurrent (default 2), not the legacy MaxConcurrency (1).
+        argon2.MaxConcurrency = Math.Max(argon2.MaxConcurrency, admission.MaxConcurrent);
 
         services.AddSingleton(argon2);
         services.AddSingleton(admission);
@@ -422,8 +451,7 @@ public static class AccountsServiceCollectionExtensions
         configuration.GetSection("Email").Bind(email);
         // Every verification and reset link is built from it: refuse to start rather than mail dead links.
         email.ValidatePublicBaseUrl(allowLoopbackHttpBaseUrl);
-        var outbox = new EmailOutboxOptions();
-        configuration.GetSection("Email:Outbox").Bind(outbox);
+        var outbox = BindOutboxOptions(configuration);
 
         // Construct crypto primitives eagerly so a malformed pepper/outbox key throws NOW.
         var tokenFactory = new HmacEmailVerificationTokenFactory(verification);
@@ -459,15 +487,10 @@ public static class AccountsServiceCollectionExtensions
     public static IServiceCollection AddBitosxEmailDelivery(
         this IServiceCollection services, IConfiguration configuration)
     {
-        var smtp = new SmtpOptions
-        {
-            Host = configuration["Email:SmtpHost"] ?? "smtp.gmail.com",
-            Port = configuration.GetValue("Email:SmtpPort", 587),
-            Username = configuration["Email:SmtpUsername"] ?? string.Empty,
-            AppPassword = configuration["Email:SmtpAppPassword"] ?? string.Empty,
-        };
-        var outbox = new EmailOutboxOptions();
-        configuration.GetSection("Email:Outbox").Bind(outbox);
+        // The overall attempt deadline (Email:AttemptTimeoutSeconds) is applied here too — before, it was only
+        // validated, and the sender always used the 30 s default.
+        var smtp = BuildSmtpOptions(configuration);
+        var outbox = BindOutboxOptions(configuration);
 
         // Fail closed on malformed delivery configuration (present-but-invalid).
         if (smtp.Port != 587) throw new InvalidOperationException("Email:SmtpPort must be 587 (STARTTLS) for EmailDelivery.");
@@ -482,7 +505,10 @@ public static class AccountsServiceCollectionExtensions
         return services;
     }
 
-    /// <summary>Enforces LeaseDuration &gt; SMTP AttemptTimeout + margin (fail closed).</summary>
+    /// <summary>
+    /// Enforces LeaseDuration &gt; SMTP AttemptTimeout + margin (fail closed). The dispatcher renews the lease for
+    /// each row right before its send, so one bounded attempt always finishes inside its own lease.
+    /// </summary>
     public static void ValidateDeliveryTimeouts(EmailOutboxOptions outbox, SmtpOptions smtp)
     {
         if (outbox.LeaseDuration <= smtp.AttemptTimeout + DeliveryTimeoutSafetyMargin)

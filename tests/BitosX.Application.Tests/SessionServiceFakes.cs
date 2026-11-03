@@ -205,8 +205,9 @@ internal sealed class FakeTotpStore : BitosX.Application.Abstractions.Persistenc
     { GetCalls++; return Task.FromResult(Enrollment); }
     public Task<BitosX.Application.Abstractions.Persistence.TotpPendingOutcome> StorePendingAsync(Guid accountId, BitosX.Application.Mfa.ProtectedTotpSecret secret, DateTime now, CancellationToken ct = default)
     { StorePendingCalls++; LastPendingSecret = secret; return Task.FromResult(StorePendingOutcome); }
-    public Task<BitosX.Application.Abstractions.Persistence.TotpConfirmOutcome> ConfirmAsync(Guid accountId, long usedStep, IReadOnlyList<byte[]> verifiers, DateTime now, CancellationToken ct = default)
-    { ConfirmCalls++; LastConfirmedStep = usedStep; LastVerifiers = verifiers; return Task.FromResult(ConfirmOutcome); }
+    public byte[]? LastConfirmNonce { get; private set; }
+    public Task<BitosX.Application.Abstractions.Persistence.TotpConfirmOutcome> ConfirmAsync(Guid accountId, byte[] expectedSecretNonce, long usedStep, IReadOnlyList<byte[]> verifiers, DateTime now, CancellationToken ct = default)
+    { ConfirmCalls++; LastConfirmNonce = expectedSecretNonce; LastConfirmedStep = usedStep; LastVerifiers = verifiers; return Task.FromResult(ConfirmOutcome); }
     public Task<bool> TryConsumeStepAsync(Guid accountId, long step, CancellationToken ct = default)
     { ConsumeStepCalls++; LastConsumedStep = step; Trace?.Add("consume-code"); return Task.FromResult(ConsumeStepResult); }
     public int HasRecoveryCalls { get; private set; }
