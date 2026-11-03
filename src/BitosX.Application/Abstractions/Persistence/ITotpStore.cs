@@ -44,6 +44,9 @@ public interface ITotpStore
     /// </summary>
     Task<bool> TryConsumeStepAsync(Guid accountId, long step, CancellationToken cancellationToken = default);
 
+    /// <summary>Whether the account holds this recovery code unused (a read; nothing is consumed).</summary>
+    Task<bool> HasUnusedRecoveryCodeAsync(Guid accountId, byte[] verifier, CancellationToken cancellationToken = default);
+
     /// <summary>Marks the recovery code used iff it belongs to the account and is unused (single use, atomic).</summary>
     Task<bool> TryConsumeRecoveryCodeAsync(Guid accountId, byte[] verifier, DateTime nowUtc, CancellationToken cancellationToken = default);
 

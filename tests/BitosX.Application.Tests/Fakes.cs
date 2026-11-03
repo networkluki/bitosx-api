@@ -15,6 +15,9 @@ internal sealed class FakeAccountRepository : IAccountRepository
 
     public void Seed(Account a) { _byNormalized[a.NormalizedEmail] = a; _byId[a.Id] = a; }
 
+    /// <summary>Simulates a lookup that a loose database collation resolves to a row with a different normalized email.</summary>
+    public void SeedUnderKey(string lookupKey, Account a) { _byNormalized[lookupKey] = a; _byId[a.Id] = a; }
+
     public int GetByNormalizedEmailCalls { get; private set; }
     public string? LastNormalizedEmailQueried { get; private set; }
     public List<string>? Trace { get; set; }

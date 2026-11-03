@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using BitosX.Contracts.Accounts;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace BitosX.Api.Tests;
 
@@ -116,5 +117,42 @@ public sealed class ArgonOverloadEndpointTests
         var wrong = await HardenedAuthApiFactory.SendAsync(
             f.CreateClient(), HttpMethod.Post, "/v1/auth/login", new { email, password = "Wrong-Password-000000" }, "127.0.0.1", ClientIp());
         Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
+    }
+
+    private static async Task<string> RegisterAndGetTokenAsync(HardenedAuthApiFactory f)
+    {
+        var email = $"user-{Guid.NewGuid():N}@example.com";
+        (await HardenedAuthApiFactory.SendAsync(f.CreateClient(), HttpMethod.Post, "/v1/auth/register", new { email }, "127.0.0.1", ClientIp())).EnsureSuccessStatusCode();
+        using (var scope = f.Services.CreateScope())
+        {
+            await scope.ServiceProvider.GetRequiredService<BitosX.Infrastructure.Email.IEmailOutboxDispatcher>().ProcessDueOnceAsync();
+        }
+
+        return CapturingEmailSender.ExtractToken(f.Emails.Sent[^1]);
+    }
+
+    [Fact]
+    public async Task QueueFull_VerifyEmail_Returns503WithRetryAfter_AndTheTokenStaysUsable()
+    {
+        var core = new BlockingArgon2Core();
+        using var f = Factory(core, maxConcurrent: 1, queueCapacity: 0, timeoutMs: 30000);
+        await f.ResetDatabaseAsync();
+        var holderToken = await RegisterAndGetTokenAsync(f);
+        var token = await RegisterAndGetTokenAsync(f);
+
+        core.Arm();
+        var blocking = HardenedAuthApiFactory.SendAsync(f.CreateClient(), HttpMethod.Post, "/v1/auth/verify-email", new { token = holderToken, password = ValidPassword }, "127.0.0.1", ClientIp());
+        await core.Entered;
+
+        var overload = await HardenedAuthApiFactory.SendAsync(f.CreateClient(), HttpMethod.Post, "/v1/auth/verify-email", new { token, password = ValidPassword }, "127.0.0.1", ClientIp());
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, overload.StatusCode); // was a 500 before
+        Assert.Equal(TimeSpan.FromSeconds(1), overload.Headers.RetryAfter?.Delta);
+        Assert.Contains("application/problem+json", overload.Content.Headers.ContentType?.MediaType);
+
+        core.Release();
+        Assert.Equal(HttpStatusCode.OK, (await blocking).StatusCode);
+        var retry = await HardenedAuthApiFactory.SendAsync(f.CreateClient(), HttpMethod.Post, "/v1/auth/verify-email", new { token, password = ValidPassword }, "127.0.0.1", ClientIp());
+        Assert.Equal(HttpStatusCode.OK, retry.StatusCode); // the challenge was not consumed by the overload
     }
 }

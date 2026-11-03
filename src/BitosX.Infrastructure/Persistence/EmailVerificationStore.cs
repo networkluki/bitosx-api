@@ -118,7 +118,9 @@ public sealed class EmailVerificationStore : IEmailVerificationStore
         DateTime nowUtc, TimeSpan minReissueInterval, CancellationToken cancellationToken = default)
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        // READ COMMITTED for the same reason as password-reset issuing: record locks only, no gap locks on the
+        // challenge range, so adjacent accounts cannot deadlock on each other's challenge insert.
+        await using var tx = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false);
 
         // Lock the account; only unverified accounts are eligible.
         var eligible = await connection.QuerySingleOrDefaultAsync<Guid?>(

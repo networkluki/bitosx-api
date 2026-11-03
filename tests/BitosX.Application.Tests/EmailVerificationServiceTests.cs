@@ -31,6 +31,18 @@ public sealed class EmailVerificationServiceTests
         Assert.Equal(0, _store.FinalizeCalls);
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public async Task Verify_MissingToken_IsInvalid_WithoutLookupOrHashing(string? token)
+    {
+        _store.ActiveToReturn = new ActiveChallengeView(Guid.NewGuid(), Guid.NewGuid(), _clock.GetUtcNow().UtcDateTime.AddMinutes(10));
+        var r = await Service().VerifyAsync(new VerifyEmailCommand(token!, ValidPw));
+        Assert.Equal(VerifyResult.Invalid, r);
+        Assert.Equal(0, _hasher.HashCalls);
+        Assert.Equal(0, _store.FinalizeCalls);
+    }
+
     [Fact]
     public async Task Verify_BogusToken_NoHashing_ReturnsInvalid()
     {

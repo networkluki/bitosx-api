@@ -181,4 +181,106 @@ public sealed class BoundedRateLimiterCacheTests
         // No idle entries exist during the burst, so at most `max` distinct keys can ever be admitted.
         Assert.True(admittedKeys.Distinct().Count() <= max);
     }
+
+    [Fact]
+    public async Task AnEntryWhoseBucketRefilled_CarriesNoState_AndIsReclaimed_BeforeItsIdleWindow()
+    {
+        var clock = new FakeTimeProvider();
+        // One-second refill (the bucket's own timer is real time); a 30-minute idle window that never passes here.
+        var policy = new TokenBucketPolicyOptions { TokenLimit = 2, TokensPerPeriod = 2, ReplenishmentSeconds = 1 };
+        using var cache = new BoundedRateLimiterCache(policy, maxPartitions: 2, Idle, clock);
+
+        Assert.True(Acquired(cache, "A"));
+        Assert.True(Acquired(cache, "B"));
+        Assert.False(cache.TryAcquire("C", out _)); // full; A and B are partly drained → they still hold state
+
+        // Wait (real time) until both buckets are back at full capacity: indistinguishable from new ones.
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        bool admitted;
+        do
+        {
+            await Task.Delay(100);
+            admitted = cache.TryAcquire("C", out var lc);
+            lc.Dispose();
+        }
+        while (!admitted && DateTime.UtcNow < deadline);
+
+        Assert.True(admitted, "a full bucket must be reclaimable without waiting for the idle window");
+        Assert.True(cache.PartitionCount <= 2);
+    }
+
+    [Fact]
+    public void ADrainedEntry_IsNeverReclaimedForANewKey_EvenWhenOthersAreFull()
+    {
+        var clock = new FakeTimeProvider();
+        using var cache = new BoundedRateLimiterCache(OneTokenPolicy(), maxPartitions: 2, Idle, clock);
+
+        Assert.True(Acquired(cache, "A"));  // drained (0 of 1)
+        Assert.False(Acquired(cache, "A"));
+        Assert.True(cache.TryAcquire("B", out var lb)); lb.Dispose();
+        Assert.False(cache.TryAcquire("C", out _));
+
+        // A is still drained: its state survived the attempted churn.
+        Assert.True(cache.TryAcquire("A", out var la));
+        using (la) Assert.False(la.IsAcquired);
+    }
+
+    /// <summary>
+    /// Deterministic version of the race the flaky concurrency test hit: a TimeProvider that runs the sweep timer
+    /// inline inside GetUtcNow (as FakeTimeProvider can). Before the fix TryAcquire read the clock while holding
+    /// the lock, the sweep re-entered the lock and disposed the limiter being acquired (ObjectDisposedException).
+    /// </summary>
+    [Fact]
+    public void AClockThatRunsTheSweepInline_NeverDisposesTheLimiterBeingAcquired()
+    {
+        var clock = new InlineTimerClock();
+        using var cache = new BoundedRateLimiterCache(RoomyPolicy(), maxPartitions: 16, TimeSpan.FromMilliseconds(10), clock);
+
+        Assert.True(Acquired(cache, "k"));
+        clock.RunTimersOnNextRead = true; // the next clock read jumps an hour ahead and fires the sweep inline
+
+        var ex = Record.Exception(() => Assert.True(Acquired(cache, "k")));
+
+        Assert.Null(ex);
+        Assert.Equal(1, clock.InlineSweeps);
+    }
+
+    private sealed class InlineTimerClock : TimeProvider
+    {
+        private DateTimeOffset _now = new(2026, 11, 1, 12, 0, 0, TimeSpan.Zero);
+        private TimerCallback? _callback;
+        private object? _state;
+
+        public bool RunTimersOnNextRead { get; set; }
+        public int InlineSweeps { get; private set; }
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            var now = _now;
+            if (RunTimersOnNextRead)
+            {
+                RunTimersOnNextRead = false;
+                _now = _now.AddHours(1);
+                now = _now;
+                InlineSweeps++;
+                _callback?.Invoke(_state); // inline, on the caller's thread
+            }
+
+            return now;
+        }
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            _callback = callback;
+            _state = state;
+            return new NoopTimer();
+        }
+
+        private sealed class NoopTimer : ITimer
+        {
+            public bool Change(TimeSpan dueTime, TimeSpan period) => true;
+            public void Dispose() { }
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
 }

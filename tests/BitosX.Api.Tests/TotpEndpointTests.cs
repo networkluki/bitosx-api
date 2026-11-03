@@ -158,6 +158,24 @@ public sealed class TotpEndpointTests : IClassFixture<LoginApiFactory>, IAsyncLi
     }
 
     [Fact]
+    public async Task ParallelWrongCodes_CannotExceedTheAttemptLimit_TheChallengeDies()
+    {
+        var (email, _, secret, _) = await EnabledAccountAsync();
+        var anon = _factory.CreateClient();
+        var challenge = await PasswordStepAsync(anon, email);
+
+        // 30 wrong codes at once: before the fix every request that read the challenge before the fifth failure
+        // committed got its code checked. Now an attempt is reserved first, so at most 5 codes are ever checked.
+        var wrong = await Task.WhenAll(Enumerable.Range(0, 30).Select(i =>
+            _factory.CreateClient().PostAsJsonAsync("/v1/auth/login/totp", new { mfaToken = challenge.MfaToken, code = (100000 + i).ToString() })));
+        Assert.All(wrong, r => Assert.Equal(HttpStatusCode.Unauthorized, r.StatusCode));
+
+        Assert.Equal(5L, await _factory.QueryScalarAsync<long>(
+            "SELECT MAX(m.attempt_count) FROM mfa_challenges m JOIN accounts a ON a.id=m.account_id WHERE a.normalized_email=@e", "@e", email.ToUpperInvariant()));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await anon.PostAsJsonAsync("/v1/auth/login/totp", new { mfaToken = challenge.MfaToken, code = Code(secret, 1) })).StatusCode);
+    }
+
+    [Fact]
     public async Task RecoveryCode_SignsIn_Once_AndCountsDown()
     {
         var (email, authed, _, codes) = await EnabledAccountAsync();

@@ -113,4 +113,76 @@ public sealed class AccountDeletionStoreTests
         Assert.Equal(AccountDeleteOutcome.InvalidAccountState, await _deletion.DeleteAccountAsync(r.AccountId, "$argon2id$v=19$m=8192,t=1,p=1$c2FsdA$aGFzaA"));
         Assert.Equal(1L, await CountAsync("SELECT COUNT(*) FROM accounts WHERE id=@a", new { a = r.AccountId }));
     }
+
+    [Fact]
+    public async Task Delete_WithAHashThatDiffersOnlyInLetterCase_IsRefused()
+    {
+        var now = AccountsTestContext.NowMicro();
+        var (accountId, _, phc) = await VerifiedAccountWithEverythingAsync(now);
+
+        // PHC salt and hash are case-sensitive Base64: the "exact hash" re-check must not ignore letter case.
+        Assert.Equal(AccountDeleteOutcome.InvalidAccountState, await _deletion.DeleteAccountAsync(accountId, phc.ToUpperInvariant()));
+        Assert.Equal(AccountDeleteOutcome.InvalidAccountState, await _deletion.DeleteAccountAsync(accountId, phc.ToLowerInvariant()));
+        Assert.Equal(1L, await CountAsync("SELECT COUNT(*) FROM accounts WHERE id=@accountId", new { accountId }));
+        Assert.Equal(AccountDeleteOutcome.Deleted, await _deletion.DeleteAccountAsync(accountId, phc));
+    }
+}
+
+/// <summary>Migration 0007: account identity and password hashes compare byte for byte.</summary>
+[Collection("Persistence")]
+public sealed class Migration0007Tests
+{
+    private readonly DatabaseFixture _fixture;
+
+    public Migration0007Tests(DatabaseFixture fixture) => _fixture = fixture;
+
+    private async Task<Guid> AddAsync(string email)
+    {
+        var account = new Application.Accounts.Account
+        {
+            Id = Guid.NewGuid(), Email = email, NormalizedEmail = Application.Accounts.EmailNormalizer.Normalize(email),
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        await _fixture.Accounts.AddAsync(account);
+        return account.Id;
+    }
+
+    [Fact]
+    public async Task Migration0007_IsRecorded_AndBothColumnsAreBinary()
+    {
+        Assert.Contains("0007_exact_email_and_password_hash_collation.sql", await _fixture.GetRecordedMigrationsAsync());
+        await using var c = await _fixture.ConnectionFactory.OpenConnectionAsync();
+        var collations = (await c.QueryAsync<(string Column, string Collation)>(
+            "SELECT column_name, collation_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'accounts' AND column_name IN ('normalized_email', 'password_hash');"))
+            .ToDictionary(r => r.Column.ToLowerInvariant(), r => r.Collation);
+        Assert.Equal("utf8mb4_bin", collations["normalized_email"]);
+        Assert.Equal("utf8mb4_bin", collations["password_hash"]);
+    }
+
+    [Theory]
+    [InlineData("josé", "jose")]          // accent
+    [InlineData("ｊｏｓｅ", "jose")]        // full width
+    [InlineData("straße", "strasse")]     // expansion under UCA
+    public async Task LookAlikeAddresses_AreDistinctAccounts_AndNeverResolveToEachOther(string variant, string ascii)
+    {
+        var suffix = Guid.NewGuid().ToString("N");
+        var plain = $"{ascii}-{suffix}@example.com";
+        var lookAlike = $"{variant}-{suffix}@example.com";
+
+        var plainId = await AddAsync(plain);
+        Assert.Null(await _fixture.Accounts.GetByNormalizedEmailAsync(Application.Accounts.EmailNormalizer.Normalize(lookAlike)));
+
+        var lookAlikeId = await AddAsync(lookAlike); // not a duplicate any more: no squatting the plain address
+        Assert.NotEqual(plainId, lookAlikeId);
+        Assert.Equal(plainId, (await _fixture.Accounts.GetByNormalizedEmailAsync(Application.Accounts.EmailNormalizer.Normalize(plain)))!.Id);
+        Assert.Equal(lookAlikeId, (await _fixture.Accounts.GetByNormalizedEmailAsync(Application.Accounts.EmailNormalizer.Normalize(lookAlike)))!.Id);
+    }
+
+    [Fact]
+    public async Task ExactNormalizedEmail_IsStillUnique()
+    {
+        var email = $"dup-{Guid.NewGuid():N}@example.com";
+        await AddAsync(email);
+        await Assert.ThrowsAsync<MySqlConnector.MySqlException>(() => AddAsync(email.ToUpperInvariant()));
+    }
 }

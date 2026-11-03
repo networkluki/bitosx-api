@@ -24,6 +24,12 @@ public enum LoginOutcome
 
     /// <summary>Password accepted and TOTP is required, but the server cannot verify codes (Totp capability off). Fail closed.</summary>
     MfaUnavailable,
+
+    /// <summary>Second sign-in step only: the account's attempt budget is used up (429, <see cref="LoginResult.RetryAfter"/>).</summary>
+    RateLimited,
+
+    /// <summary>Second sign-in step only: the per-account limiter is at capacity (generic 503, fail closed).</summary>
+    TemporarilyUnavailable,
 }
 
 /// <summary>
@@ -42,6 +48,13 @@ public sealed record LoginResult
     /// <summary>Opaque second-step token (43-char Base64URL), set only for <see cref="LoginOutcome.MfaRequired"/>.</summary>
     public string? MfaToken { get; init; }
     public DateTime MfaTokenExpiresAt { get; init; }
+
+    /// <summary>With <see cref="LoginOutcome.RateLimited"/>: when the caller may try again, if known.</summary>
+    public TimeSpan? RetryAfter { get; init; }
+
+    public static LoginResult RateLimited(TimeSpan? retryAfter) => new() { Outcome = LoginOutcome.RateLimited, RetryAfter = retryAfter };
+
+    public static LoginResult TemporarilyUnavailable { get; } = new() { Outcome = LoginOutcome.TemporarilyUnavailable };
 
     public static LoginResult InvalidCredentials { get; } = new() { Outcome = LoginOutcome.InvalidCredentials };
 

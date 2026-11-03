@@ -130,7 +130,9 @@ if (capabilities.AccountCoreEnabled)
 
     if (capabilities.EmailVerificationEnabled)
     {
-        builder.Services.AddBitosxEmailVerification(builder.Configuration, bitosxConnectionString!);
+        // Email:PublicBaseUrl must be https (fail closed); a loopback http URL is accepted only in Development/Testing.
+        var allowLoopbackHttpBaseUrl = builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing");
+        builder.Services.AddBitosxEmailVerification(builder.Configuration, bitosxConnectionString!, allowLoopbackHttpBaseUrl);
     }
 
     // EmailDelivery (SMTP sender + background dispatcher) is registered ONLY when SMTP
@@ -203,6 +205,10 @@ if (capabilities.LoginEnabled)
 {
     app.UseAuthentication();
     app.UseAuthorization();
+
+    // Per-account limiters that must run before the endpoint reads its body (the envelope upload): after
+    // authorization (the account id is the validated JWT's sub), before endpoint execution.
+    app.UseMiddleware<PerAccountRateLimitMiddleware>();
 }
 
 // OpenAPI document is mapped ONLY in Development (see AddOpenApi gating above). In Production the route

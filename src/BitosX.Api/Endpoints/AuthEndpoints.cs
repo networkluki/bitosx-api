@@ -50,6 +50,18 @@ public static class AuthEndpoints
     private static IResult SecondFactorUnavailable() => Results.Problem(
         statusCode: StatusCodes.Status503ServiceUnavailable, title: "Service unavailable", detail: "Two-factor sign-in is temporarily unavailable.");
 
+    // Same generic 429 as the limiter filters: never which limiter fired.
+    private static IResult TooManyRequests(HttpContext http, TimeSpan? retryAfter)
+    {
+        var seconds = retryAfter is { } r ? (int)Math.Ceiling(r.TotalSeconds) : 0;
+        if (seconds > 0)
+        {
+            http.Response.Headers.RetryAfter = seconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        return Results.Problem(statusCode: StatusCodes.Status429TooManyRequests, title: "Too Many Requests", detail: "Too many requests. Try again later.");
+    }
+
     private static IResult Unauthenticated() => Results.Problem(
         statusCode: StatusCodes.Status401Unauthorized, title: "Unauthorized", detail: "Authentication required.");
 
@@ -109,9 +121,18 @@ public static class AuthEndpoints
                 : Results.Json(new AcceptedResponse(GenericAccepted), statusCode: StatusCodes.Status202Accepted);
         }).WithName("Register");
 
-        group.MapPost("/verify-email", async (VerifyEmailRequest request, IEmailVerificationService service, CancellationToken ct) =>
+        group.MapPost("/verify-email", async (VerifyEmailRequest request, HttpContext http, IEmailVerificationService service, CancellationToken ct) =>
         {
-            var result = await service.VerifyAsync(new VerifyEmailCommand(request.Token, request.Password), ct);
+            VerifyResult result;
+            try
+            {
+                result = await service.VerifyAsync(new VerifyEmailCommand(request.Token, request.Password), ct);
+            }
+            catch (PasswordHashingCapacityExceededException)
+            {
+                return CapacityUnavailable(http); // Argon2 admission overload → 503, the token stays usable
+            }
+
             return result switch
             {
                 VerifyResult.Verified => Results.Ok(
@@ -271,11 +292,18 @@ public static class AuthEndpoints
                 return CapacityUnavailable(http);
             }
 
-            return result.Outcome == LoginOutcome.Succeeded
-                ? Results.Ok(new TokenResponse(
-                    result.AccessToken!, result.AccessTokenExpiresAt, result.RefreshToken!, result.RefreshTokenExpiresAt))
-                : InvalidMfa();
+            return result.Outcome switch
+            {
+                LoginOutcome.Succeeded => Results.Ok(new TokenResponse(
+                    result.AccessToken!, result.AccessTokenExpiresAt, result.RefreshToken!, result.RefreshTokenExpiresAt)),
+                // Per-account budget (MfaPerAccount) used up, or its limiter at capacity: the generic limiter contracts.
+                LoginOutcome.RateLimited => TooManyRequests(http, result.RetryAfter),
+                LoginOutcome.TemporarilyUnavailable => Results.Problem(
+                    statusCode: StatusCodes.Status503ServiceUnavailable, title: "Service unavailable", detail: "Service temporarily unavailable."),
+                _ => InvalidMfa(),
+            };
         })
+        // Order: per-IP → 4 KiB body → service (per-account limit once the challenge names the account).
         .AddEndpointFilter(AuthRateLimiting.MfaPerIpFilter)
         .AddEndpointFilter(RejectOversizedBody)
         .WithName("LoginTotp");

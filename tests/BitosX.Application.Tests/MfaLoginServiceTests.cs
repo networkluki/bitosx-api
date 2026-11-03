@@ -24,6 +24,7 @@ public sealed class MfaLoginServiceTests
     private readonly FakeTimeProvider _clock = new(new DateTimeOffset(Now));
     private readonly FakeTotpCrypto _crypto = new();
     private readonly TotpOptions _options = new();
+    private readonly FakeMfaLimiter _limiter = new();
 
     private MfaLoginService Service()
     {
@@ -32,7 +33,7 @@ public sealed class MfaLoginServiceTests
             Outcome = LoginSessionCreateOutcome.Created, AccountId = AccountId, SessionId = Guid.NewGuid(),
             SessionCreatedAt = Now, SessionAbsoluteExpiresAt = Now.AddDays(90), RefreshTokenExpiresAt = Now.AddDays(30),
         };
-        return new MfaLoginService(_accounts, _challenges, _totp, new MfaCodeVerifier(_totp, _crypto, _options, _clock), _tokens, _sessions, _access, _options, _clock);
+        return new MfaLoginService(_accounts, _challenges, _totp, new MfaCodeVerifier(_totp, _crypto, _options, _clock), _tokens, _sessions, _access, _limiter, _options, _clock);
     }
 
     private void SeedAccountAndChallenge(string? phc = Phc, bool confirmed = true)
@@ -61,25 +62,138 @@ public sealed class MfaLoginServiceTests
     }
 
     [Fact]
-    public async Task WrongCode_RecordsFailedAttempt_NoSession()
+    public async Task WrongCode_UsesItsReservedAttempt_NoSession()
     {
         SeedAccountAndChallenge();
         var r = await Service().CompleteAsync(new MfaLoginCommand(GoodToken(), "000000"));
 
         Assert.Equal(LoginOutcome.InvalidCredentials, r.Outcome);
-        Assert.Equal(1, _challenges.FailedAttemptCalls);
+        Assert.Equal(1, _challenges.ReserveCalls);
+        Assert.Equal(1, _challenges.FailedAttemptCalls); // the close-at-limit check ran
         Assert.Equal(0, _challenges.ConsumeCalls);
         Assert.Equal(0, _sessions.CreateCalls);
+    }
+
+    [Fact]
+    public async Task TheAttemptIsReservedBeforeTheCodeIsLookedAt_AndTheChallengeIsClaimedBeforeTheCodeIsSpent()
+    {
+        SeedAccountAndChallenge();
+        var trace = new List<string>();
+        _challenges.Trace = trace;
+        _totp.Trace = trace;
+
+        var r = await Service().CompleteAsync(new MfaLoginCommand(GoodToken(), "ABCDE FGHJK"));
+
+        Assert.Equal(LoginOutcome.Succeeded, r.Outcome);
+        Assert.Equal(["reserve", "consume-challenge", "consume-code"], trace);
+    }
+
+    [Fact]
+    public async Task NoAttemptLeft_TheCodeIsNeverChecked()
+    {
+        SeedAccountAndChallenge();
+        _challenges.ReserveResult = false;
+
+        var r = await Service().CompleteAsync(new MfaLoginCommand(GoodToken(), CurrentCode()));
+
+        Assert.Equal(LoginOutcome.InvalidCredentials, r.Outcome);
+        Assert.Equal(0, _totp.GetCalls);
+        Assert.Equal(0, _totp.ConsumeStepCalls);
+        Assert.Equal(0, _sessions.CreateCalls);
+    }
+
+    [Fact]
+    public async Task ParallelWrongCodes_GetAtMostMaxAttemptsCodeChecks()
+    {
+        SeedAccountAndChallenge();
+        var service = Service();
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 25).Select(_ => Task.Run(() => service.CompleteAsync(new MfaLoginCommand(GoodToken(), "000000")))));
+
+        Assert.All(results, x => Assert.Equal(LoginOutcome.InvalidCredentials, x.Outcome));
+        Assert.Equal(_options.MaxMfaAttempts, _challenges.ReservedAttempts);
+        Assert.Equal(_options.MaxMfaAttempts, _challenges.FailedAttemptCalls); // only reserved attempts reached the code check
+        Assert.Equal(_options.MaxMfaAttempts, _totp.GetCalls);
+    }
+
+    [Fact]
+    public async Task ChallengeLostToAConcurrentCompletion_DoesNotSpendTheRecoveryCode()
+    {
+        SeedAccountAndChallenge();
+        _challenges.ConsumeResult = false;
+
+        var r = await Service().CompleteAsync(new MfaLoginCommand(GoodToken(), "abcde-fghjk"));
+
+        Assert.Equal(LoginOutcome.InvalidCredentials, r.Outcome);
+        Assert.Equal(0, _totp.ConsumeRecoveryCalls);
+        Assert.Equal(0, _sessions.CreateCalls);
+    }
+
+    [Fact]
+    public async Task PerAccountLimiter_RateLimited_NoAttemptReserved()
+    {
+        SeedAccountAndChallenge();
+        _limiter.Decision = new MfaAttemptDecision(MfaAttemptAdmission.RateLimited, TimeSpan.FromSeconds(42));
+
+        var r = await Service().CompleteAsync(new MfaLoginCommand(GoodToken(), CurrentCode()));
+
+        Assert.Equal(LoginOutcome.RateLimited, r.Outcome);
+        Assert.Equal(TimeSpan.FromSeconds(42), r.RetryAfter);
+        Assert.Equal(AccountId, _limiter.LastAccountId); // keyed by the account the challenge belongs to
+        Assert.Equal(0, _challenges.ReserveCalls);
+        Assert.Equal(0, _sessions.CreateCalls);
+    }
+
+    [Fact]
+    public async Task PerAccountLimiter_AtCapacity_FailsClosed()
+    {
+        SeedAccountAndChallenge();
+        _limiter.Decision = new MfaAttemptDecision(MfaAttemptAdmission.Unavailable);
+
+        var r = await Service().CompleteAsync(new MfaLoginCommand(GoodToken(), CurrentCode()));
+
+        Assert.Equal(LoginOutcome.TemporarilyUnavailable, r.Outcome);
+        Assert.Equal(0, _challenges.ReserveCalls);
+    }
+
+    [Fact]
+    public async Task UnknownToken_NeverReachesTheLimiter()
+    {
+        SeedAccountAndChallenge();
+        _challenges.Active = null;
+        await Service().CompleteAsync(new MfaLoginCommand(GoodToken(), CurrentCode()));
+        Assert.Equal(0, _limiter.Calls);
+    }
+
+    private sealed class FakeMfaLimiter : IMfaAttemptLimiter
+    {
+        public MfaAttemptDecision Decision { get; set; } = MfaAttemptDecision.Admitted;
+        public int Calls { get; private set; }
+        public Guid LastAccountId { get; private set; }
+
+        public MfaAttemptDecision TryAdmit(Guid accountId) { Calls++; LastAccountId = accountId; return Decision; }
     }
 
     [Fact]
     public async Task ReplayedStep_IsRejectedByTheStore()
     {
         SeedAccountAndChallenge();
-        _totp.ConsumeStepResult = false; // the store says this step was already used
+        _totp.ConsumeStepResult = false; // the store says this step was already used (a concurrent use won)
         var r = await Service().CompleteAsync(new MfaLoginCommand(GoodToken(), CurrentCode()));
         Assert.Equal(LoginOutcome.InvalidCredentials, r.Outcome);
         Assert.Equal(0, _sessions.CreateCalls);
+    }
+
+    [Fact]
+    public async Task AStepAtOrBelowTheLastUsedOne_DoesNotMatch()
+    {
+        SeedAccountAndChallenge();
+        var step = Rfc6238Totp.Step(_clock.GetUtcNow().ToUnixTimeSeconds(), 30);
+        _totp.Enrollment = _totp.Enrollment! with { LastUsedStep = step };
+        var r = await Service().CompleteAsync(new MfaLoginCommand(GoodToken(), CurrentCode()));
+        Assert.Equal(LoginOutcome.InvalidCredentials, r.Outcome);
+        Assert.Equal(0, _totp.ConsumeStepCalls);
+        Assert.Equal(0, _challenges.ConsumeCalls);
     }
 
     [Fact]

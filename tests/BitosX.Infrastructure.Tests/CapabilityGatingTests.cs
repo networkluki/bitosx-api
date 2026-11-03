@@ -33,6 +33,7 @@ public sealed class CapabilityGatingTests
             d["Email:SmtpPort"] = "587";
         }
         d["Email:FromAddress"] = "bitosx@example.com";
+        d["Email:PublicBaseUrl"] = "https://vault.bitosx.se";
         return new ConfigurationBuilder().AddInMemoryCollection(d).Build();
     }
 
@@ -182,6 +183,29 @@ public sealed class CapabilityGatingTests
         Assert.True(Has<IEmailSender>(s));
         Assert.True(Has<IEmailOutboxDispatcher>(s));
         Assert.True(Has<IHostedService>(s)); // EmailOutboxBackgroundService
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("/verify-email")]
+    [InlineData("http://vault.bitosx.se")]
+    [InlineData("http://localhost:5173")]
+    public void EmailVerification_WithoutAnAbsoluteHttpsPublicBaseUrl_FailsClosed(string? url)
+    {
+        var cfg = new ConfigurationBuilder().AddConfiguration(Config(delivery: false))
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Email:PublicBaseUrl"] = url }).Build();
+        var ex = Assert.Throws<InvalidOperationException>(() => new ServiceCollection().AddBitosxEmailVerification(cfg, DummyConn));
+        Assert.Contains("Email:PublicBaseUrl", ex.Message);
+    }
+
+    [Fact]
+    public void EmailVerification_LoopbackHttpPublicBaseUrl_IsAccepted_OnlyWhenTheHostAllowsIt()
+    {
+        var cfg = new ConfigurationBuilder().AddConfiguration(Config(delivery: false))
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Email:PublicBaseUrl"] = "http://localhost:5173" }).Build();
+        new ServiceCollection().AddBitosxEmailVerification(cfg, DummyConn, allowLoopbackHttpBaseUrl: true);
+        Assert.Throws<InvalidOperationException>(() => new ServiceCollection().AddBitosxEmailVerification(cfg, DummyConn, allowLoopbackHttpBaseUrl: false));
     }
 
     [Fact]

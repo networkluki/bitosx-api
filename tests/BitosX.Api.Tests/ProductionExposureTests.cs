@@ -90,6 +90,60 @@ public sealed class ProductionExposureTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/v1/account/me")).StatusCode);
     }
 
+    private static void EnableVerification(IDictionary<string, string?> s)
+    {
+        s["ConnectionStrings:Bitosx"] = DummyConn;
+        s["Security:EmailVerificationPepper"] = "test-pepper-value-please-long-random";
+        s["Security:EmailOutboxKey"] = Convert.ToBase64String(new byte[32]);
+        s["Email:FromAddress"] = "bitosx@example.com";
+        s["Email:PublicBaseUrl"] = "https://vault.bitosx.se";
+    }
+
+    [Fact]
+    public void Production_EmailVerificationOnly_HardeningDisabled_FailsStartup()
+    {
+        // No JWT key (Login off): forgot/reset-password are still public and their limiters need hardening.
+        using var f = Factory("Production", EnableVerification);
+        Assert.Contains("PublicExposureHardening", StartupError(f), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Production_EmailVerificationOnly_HardeningEnabled_Starts()
+    {
+        using var f = Factory("Production", s =>
+        {
+            EnableVerification(s);
+            s["Security:PublicExposureHardening:Enabled"] = "true";
+        });
+        Assert.Equal(HttpStatusCode.OK, (await f.CreateClient().GetAsync("/health")).StatusCode);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("http://localhost:5173")] // loopback http is a Development/Testing convenience only
+    [InlineData("vault.bitosx.se")]
+    public void Production_EmailVerification_WithoutAnHttpsPublicBaseUrl_FailsStartup(string url)
+    {
+        using var f = Factory("Production", s =>
+        {
+            EnableVerification(s);
+            s["Security:PublicExposureHardening:Enabled"] = "true";
+            s["Email:PublicBaseUrl"] = url;
+        });
+        Assert.Contains("Email:PublicBaseUrl", StartupError(f), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Development_EmailVerification_LoopbackHttpPublicBaseUrl_Starts()
+    {
+        using var f = Factory("Development", s =>
+        {
+            EnableVerification(s);
+            s["Email:PublicBaseUrl"] = "http://localhost:5173";
+        });
+        Assert.Equal(HttpStatusCode.OK, (await f.CreateClient().GetAsync("/health")).StatusCode);
+    }
+
     [Fact]
     public async Task Production_LoginDisabled_DoesNotRequireHardening()
     {

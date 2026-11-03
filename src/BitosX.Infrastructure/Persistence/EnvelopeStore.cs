@@ -67,7 +67,10 @@ public sealed class EnvelopeStore : IEnvelopeStore
         if (fingerprint.Length != 32) throw new ArgumentException("The fingerprint must be 32 bytes.", nameof(fingerprint));
 
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        // READ COMMITTED: the locking read below on a missing vault_blobs row (a first upload) takes no gap lock,
+        // so first uploads of DIFFERENT accounts whose ids share a gap cannot deadlock on each other's insert
+        // intention (under REPEATABLE READ they did). The account row lock still serializes one account's uploads.
+        await using var tx = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false);
 
         // The account row is locked first so a concurrent account deletion cannot slip between the
         // existence check and the write (the FK would refuse the insert, but the row lock makes the

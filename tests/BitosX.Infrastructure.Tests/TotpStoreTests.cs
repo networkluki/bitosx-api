@@ -89,6 +89,53 @@ public sealed class TotpStoreTests
     }
 
     [Fact]
+    public async Task ReservingAttempts_UnderConcurrency_NeverExceedsTheLimit()
+    {
+        var now = AccountsTestContext.NowMicro();
+        var r = await _ctx.RegisterAsync(now);
+        var id = Guid.NewGuid();
+        await _challenges.CreateAsync(new MfaChallenge(id, r.AccountId, RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32), null, now, now.AddMinutes(5)));
+
+        // 40 requests race for one challenge: exactly 5 may ever check a code.
+        var store = new MfaChallengeStore(_fixture.RuntimeConnectionFactory);
+        var granted = await Task.WhenAll(Enumerable.Range(0, 40).Select(_ => Task.Run(() => store.TryReserveAttemptAsync(id, 5, now))));
+
+        Assert.Equal(5, granted.Count(g => g));
+        Assert.Equal(5L, await CountAsync("SELECT attempt_count FROM mfa_challenges WHERE id=@id", new { id }));
+    }
+
+    [Fact]
+    public async Task ReservingAnAttempt_OnAnExpiredOrConsumedChallenge_Fails()
+    {
+        var now = AccountsTestContext.NowMicro();
+        var r = await _ctx.RegisterAsync(now);
+        var expired = Guid.NewGuid();
+        await _challenges.CreateAsync(new MfaChallenge(expired, r.AccountId, RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32), null, now, now.AddMinutes(5)));
+        Assert.False(await _challenges.TryReserveAttemptAsync(expired, 5, now.AddMinutes(6)));
+
+        var consumed = Guid.NewGuid();
+        await _challenges.CreateAsync(new MfaChallenge(consumed, r.AccountId, RandomNumberGenerator.GetBytes(32), RandomNumberGenerator.GetBytes(32), null, now, now.AddMinutes(5)));
+        Assert.True(await _challenges.TryConsumeAsync(consumed, now));
+        Assert.False(await _challenges.TryReserveAttemptAsync(consumed, 5, now));
+    }
+
+    [Fact]
+    public async Task HasUnusedRecoveryCode_ReadsWithoutConsuming()
+    {
+        var now = AccountsTestContext.NowMicro();
+        var r = await _ctx.RegisterAsync(now);
+        var codes = Verifiers(5);
+        Assert.Equal(TotpPendingOutcome.Stored, await _store.StorePendingAsync(r.AccountId, Secret(), now));
+        Assert.Equal(TotpConfirmOutcome.Confirmed, await _store.ConfirmAsync(r.AccountId, 1, codes, now));
+
+        Assert.True(await _store.HasUnusedRecoveryCodeAsync(r.AccountId, codes[0]));
+        Assert.True(await _store.HasUnusedRecoveryCodeAsync(r.AccountId, codes[0]));
+        Assert.False(await _store.HasUnusedRecoveryCodeAsync(Guid.NewGuid(), codes[0]));
+        Assert.True(await _store.TryConsumeRecoveryCodeAsync(r.AccountId, codes[0], now));
+        Assert.False(await _store.HasUnusedRecoveryCodeAsync(r.AccountId, codes[0]));
+    }
+
+    [Fact]
     public async Task DeletingTheAccount_CascadesEverything()
     {
         await _fixture.ResetAsync();
@@ -128,11 +175,18 @@ public sealed class TotpStoreTests
         Assert.Null(await _challenges.FindActiveAsync(RandomNumberGenerator.GetBytes(32), now));
         Assert.True(await _challenges.FindActiveAsync(verifier, now.AddMinutes(6)) is null, "expired");
 
-        // Failed attempts: the fifth kills the challenge.
-        for (var i = 0; i < 4; i++) await _challenges.RecordFailedAttemptAsync(id, 5, now);
+        // Failed attempts: each is reserved first; after the fifth the challenge is closed.
+        for (var i = 0; i < 4; i++)
+        {
+            Assert.True(await _challenges.TryReserveAttemptAsync(id, 5, now));
+            await _challenges.CloseIfAttemptsExhaustedAsync(id, 5, now);
+        }
+
         Assert.Equal(4, (await _challenges.FindActiveAsync(verifier, now))!.AttemptCount);
-        await _challenges.RecordFailedAttemptAsync(id, 5, now);
+        Assert.True(await _challenges.TryReserveAttemptAsync(id, 5, now));
+        await _challenges.CloseIfAttemptsExhaustedAsync(id, 5, now);
         Assert.Null(await _challenges.FindActiveAsync(verifier, now));
+        Assert.False(await _challenges.TryReserveAttemptAsync(id, 5, now));
         Assert.False(await _challenges.TryConsumeAsync(id, now));
 
         // A fresh one is single use.

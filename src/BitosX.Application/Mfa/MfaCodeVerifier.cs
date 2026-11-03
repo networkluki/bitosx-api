@@ -3,10 +3,21 @@ using BitosX.Application.Abstractions.Persistence;
 namespace BitosX.Application.Mfa;
 
 /// <summary>
+/// A second-factor code that matched a confirmed enrollment but is not used up yet: either a TOTP step
+/// (still to be recorded by the replay guard) or a recovery-code verifier (still to be marked used).
+/// </summary>
+public sealed record MatchedSecondFactor(bool IsTotp, long Step, byte[]? RecoveryVerifier)
+{
+    public override string ToString() => $"MatchedSecondFactor {{ IsTotp = {IsTotp}, Step = {Step}, RecoveryVerifier = <redacted> }}";
+}
+
+/// <summary>
 /// Checks a second-factor code against a confirmed enrollment and consumes it: a TOTP code is matched
 /// within the window and its step recorded (replay guard), a recovery code is matched by keyed verifier
-/// and marked used. Shared by the second sign-in step and by TOTP management (disable, regenerate).
-/// Every failure is one boolean; nothing says which kind of code was tried.
+/// and marked used. Shared by the second sign-in step and by TOTP management (disable, regenerate) and the
+/// password-confirmed account operations. Every failure is one boolean; nothing says which kind of code was
+/// tried. Matching and consuming are also available separately, so the second sign-in step can claim its
+/// challenge before it uses up a code.
 /// </summary>
 public sealed class MfaCodeVerifier
 {
@@ -25,25 +36,50 @@ public sealed class MfaCodeVerifier
 
     public async Task<bool> VerifyAndConsumeAsync(TotpEnrollment enrollment, string? code, CancellationToken cancellationToken = default)
     {
+        var match = await TryMatchAsync(enrollment, code, cancellationToken).ConfigureAwait(false);
+        return match is not null && await ConsumeAsync(enrollment, match, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="code"/> is a valid, unused TOTP or recovery code for the confirmed enrollment.
+    /// Consumes nothing; <see cref="ConsumeAsync"/> is the authority on single use.
+    /// </summary>
+    public async Task<MatchedSecondFactor?> TryMatchAsync(TotpEnrollment enrollment, string? code, CancellationToken cancellationToken = default)
+    {
         if (enrollment is null || !enrollment.IsConfirmed || string.IsNullOrEmpty(code) || code.Length > 32)
         {
-            return false;
+            return null;
         }
 
         var trimmed = code.Trim();
         if (Rfc6238Totp.IsDigits(trimmed, _options.Digits))
         {
-            return await VerifyTotpAsync(enrollment, trimmed, cancellationToken).ConfigureAwait(false);
+            return TryMatchTotp(enrollment, trimmed, out var step) ? new MatchedSecondFactor(true, step, null) : null;
         }
 
         var canonical = RecoveryCodes.Canonicalize(trimmed);
         if (canonical is null)
         {
-            return false;
+            return null;
         }
 
         var verifier = _crypto.RecoveryCodeVerifier(canonical);
-        return await _store.TryConsumeRecoveryCodeAsync(enrollment.AccountId, verifier, _clock.GetUtcNow().UtcDateTime, cancellationToken).ConfigureAwait(false);
+        return await _store.HasUnusedRecoveryCodeAsync(enrollment.AccountId, verifier, cancellationToken).ConfigureAwait(false)
+            ? new MatchedSecondFactor(false, 0, verifier)
+            : null;
+    }
+
+    /// <summary>
+    /// Uses up a matched code. The store decides: two concurrent presentations of the same TOTP step or the same
+    /// recovery code race here, and exactly one wins.
+    /// </summary>
+    public Task<bool> ConsumeAsync(TotpEnrollment enrollment, MatchedSecondFactor match, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(enrollment);
+        ArgumentNullException.ThrowIfNull(match);
+        return match.IsTotp
+            ? _store.TryConsumeStepAsync(enrollment.AccountId, match.Step, cancellationToken)
+            : _store.TryConsumeRecoveryCodeAsync(enrollment.AccountId, match.RecoveryVerifier!, _clock.GetUtcNow().UtcDateTime, cancellationToken);
     }
 
     /// <summary>TOTP only (used to confirm a pending enrollment, where no recovery codes exist yet). Does not consume.</summary>
@@ -62,17 +98,5 @@ public sealed class MfaCodeVerifier
         {
             System.Security.Cryptography.CryptographicOperations.ZeroMemory(secret);
         }
-    }
-
-    private async Task<bool> VerifyTotpAsync(TotpEnrollment enrollment, string code, CancellationToken cancellationToken)
-    {
-        if (!TryMatchTotp(enrollment, code, out var step))
-        {
-            return false;
-        }
-
-        // The store is the authority on replay: two concurrent presentations of the same code race here,
-        // and exactly one wins.
-        return await _store.TryConsumeStepAsync(enrollment.AccountId, step, cancellationToken).ConfigureAwait(false);
     }
 }

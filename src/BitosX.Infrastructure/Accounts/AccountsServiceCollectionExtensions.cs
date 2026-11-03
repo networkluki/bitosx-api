@@ -10,6 +10,7 @@ using BitosX.Infrastructure.Persistence;
 using BitosX.Infrastructure.Security;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 
 namespace BitosX.Infrastructure.Accounts;
@@ -388,6 +389,9 @@ public static class AccountsServiceCollectionExtensions
 
         services.AddSingleton<ITotpCrypto>(crypto);
         services.AddScoped<MfaCodeVerifier>();
+        // The HTTP host registers its hardened per-account limiter first; any other host admits every attempt
+        // (the per-challenge attempt limit still applies).
+        services.TryAddSingleton<IMfaAttemptLimiter, UnlimitedMfaAttempts>();
         services.AddScoped<IMfaLoginService, MfaLoginService>();
         services.AddScoped<ITotpEnrollmentService, TotpEnrollmentService>();
         return services;
@@ -395,8 +399,14 @@ public static class AccountsServiceCollectionExtensions
 
     // ---- EmailVerification: register/verify/resend + outbox persistence (no SMTP send) ----
 
+    /// <param name="services">The service collection.</param>
+    /// <param name="configuration">The configuration.</param>
+    /// <param name="runtimeConnectionString">The DML-only runtime connection string.</param>
+    /// <param name="allowLoopbackHttpBaseUrl">
+    /// Accept an <c>http://</c> loopback <c>Email:PublicBaseUrl</c> (Development/Testing only); otherwise it must be https.
+    /// </param>
     public static IServiceCollection AddBitosxEmailVerification(
-        this IServiceCollection services, IConfiguration configuration, string runtimeConnectionString)
+        this IServiceCollection services, IConfiguration configuration, string runtimeConnectionString, bool allowLoopbackHttpBaseUrl = false)
     {
         // Fail closed on malformed verification secrets (present-but-invalid).
         var verification = new EmailVerificationSecurityOptions
@@ -410,6 +420,8 @@ public static class AccountsServiceCollectionExtensions
         var outboxCrypto = new EmailOutboxCryptoOptions { Key = configuration["Security:EmailOutboxKey"] ?? string.Empty };
         var email = new EmailOptions();
         configuration.GetSection("Email").Bind(email);
+        // Every verification and reset link is built from it: refuse to start rather than mail dead links.
+        email.ValidatePublicBaseUrl(allowLoopbackHttpBaseUrl);
         var outbox = new EmailOutboxOptions();
         configuration.GetSection("Email:Outbox").Bind(outbox);
 

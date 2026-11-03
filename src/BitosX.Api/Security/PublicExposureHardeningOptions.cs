@@ -40,6 +40,12 @@ public sealed class PublicExposureHardeningOptions
     /// <summary>Second sign-in step (TOTP / recovery code) per trusted client IP (phase 7). Each attempt is cheap but guessable; the challenge itself allows 5 tries.</summary>
     public TokenBucketPolicyOptions MfaPerIp { get; set; } = new() { TokenLimit = 10, TokensPerPeriod = 5, ReplenishmentSeconds = 30 };
 
+    /// <summary>
+    /// Second sign-in step per account (phase 8), across all of the account's challenges: keyed by the account the
+    /// challenge token resolves to. Each challenge additionally allows 5 codes.
+    /// </summary>
+    public TokenBucketPolicyOptions MfaPerAccount { get; set; } = new() { TokenLimit = 10, TokensPerPeriod = 2, ReplenishmentSeconds = 60 };
+
     /// <summary>TOTP enrollment/confirm/disable/recovery-code calls per account (phase 7): each is password- and/or code-confirmed.</summary>
     public TokenBucketPolicyOptions TotpManagePerAccount { get; set; } = new() { TokenLimit = 10, TokensPerPeriod = 2, ReplenishmentSeconds = 60 };
 
@@ -63,6 +69,7 @@ public sealed class PublicExposureHardeningOptions
         AccountDeletePerAccount.Validate($"{SectionName}:AccountDeletePerAccount");
         PasswordChangePerAccount.Validate($"{SectionName}:PasswordChangePerAccount");
         MfaPerIp.Validate($"{SectionName}:MfaPerIp");
+        MfaPerAccount.Validate($"{SectionName}:MfaPerAccount");
         TotpManagePerAccount.Validate($"{SectionName}:TotpManagePerAccount");
         PartitionState.Validate($"{SectionName}:PartitionState");
         GlobalLoginBudget.Validate($"{SectionName}:GlobalLoginBudget");

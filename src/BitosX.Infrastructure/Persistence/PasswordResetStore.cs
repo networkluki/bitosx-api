@@ -38,7 +38,10 @@ public sealed class PasswordResetStore : IPasswordResetStore
         }
 
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        // READ COMMITTED: the locking read on the account's (possibly empty) challenge range takes record locks
+        // only, no gap locks, so two accounts whose challenge rows are adjacent cannot deadlock on each other's
+        // insert. The account row lock taken first serializes one account's issues.
+        await using var tx = await connection.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false);
 
         var eligible = await connection.QuerySingleOrDefaultAsync<Guid?>(
             new CommandDefinition(

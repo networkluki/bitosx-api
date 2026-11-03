@@ -4,13 +4,16 @@ using Dapper;
 namespace BitosX.Infrastructure.Persistence;
 
 /// <summary>
-/// Dapper-backed <see cref="IAccountDeletionStore"/> over MariaDB. Locks the account row, re-checks
-/// that it is still the account the caller verified (same exact PHC, verified, enabled), then deletes
+/// Dapper-backed <see cref="IAccountDeletionStore"/> over MariaDB. Locks the account row (no state
+/// predicates in the locking read), re-checks that it is still the account the caller verified (verified,
+/// enabled, and the exact PHC compared ordinally in C# — never through a column collation), then deletes
 /// it. Foreign keys cascade to challenges (and through them outbox rows), sessions (and through them
 /// refresh tokens) and vault_blobs, so nothing account-owned survives the commit.
 /// </summary>
 public sealed class AccountDeletionStore : IAccountDeletionStore
 {
+    private sealed record AccountLockRow(Guid Id, DateTime? EmailVerifiedAt, string? PasswordHash, DateTime? DisabledAt);
+
     private readonly BitosxConnectionFactory _connectionFactory;
 
     public AccountDeletionStore(BitosxConnectionFactory connectionFactory) => _connectionFactory = connectionFactory;
@@ -23,23 +26,23 @@ public sealed class AccountDeletionStore : IAccountDeletionStore
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-        var locked = await connection.QuerySingleOrDefaultAsync<Guid?>(new CommandDefinition(
-            """
-            SELECT id FROM accounts
-            WHERE id = @accountId AND password_hash = @expectedPasswordHash
-              AND email_verified_at IS NOT NULL AND disabled_at IS NULL
-            FOR UPDATE;
-            """, new { accountId, expectedPasswordHash }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        var locked = await connection.QuerySingleOrDefaultAsync<AccountLockRow>(new CommandDefinition(
+            "SELECT id, email_verified_at, password_hash, disabled_at FROM accounts WHERE id = @accountId FOR UPDATE;",
+            new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
-        if (locked is null)
+        var deletable = locked is not null
+            && locked.EmailVerifiedAt is not null
+            && locked.DisabledAt is null
+            && string.Equals(locked.PasswordHash, expectedPasswordHash, StringComparison.Ordinal);
+        if (!deletable)
         {
             await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
             return AccountDeleteOutcome.InvalidAccountState;
         }
 
         var rows = await connection.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM accounts WHERE id = @accountId AND password_hash = @expectedPasswordHash;",
-            new { accountId, expectedPasswordHash }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            "DELETE FROM accounts WHERE id = @accountId;",
+            new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         if (rows != 1)
         {

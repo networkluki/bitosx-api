@@ -8,16 +8,23 @@ namespace BitosX.Api.Security;
 /// (one per client-IP or per-email-hash key).
 ///
 /// <para><b>Security invariant:</b> <see cref="_maxPartitions"/> is a memory-safety boundary, NOT a
-/// licence to reset live rate-limit state. A limiter that has not been idle for at least
-/// <see cref="_idleExpiration"/> is NEVER evicted merely because unrelated partition keys arrive. When a
-/// NEW key arrives and the cache is full, only entries already past the idle threshold may be reclaimed;
-/// if none are eligible the new key is refused (<see cref="TryAcquire"/> returns false → the caller fails
-/// closed with 503). Existing partitions always keep their limiter, even at capacity.</para>
+/// licence to reset live rate-limit state. A limiter that still holds rate-limit state is NEVER evicted
+/// merely because unrelated partition keys arrive. An entry may be reclaimed only when it carries no state:
+/// it has been idle for at least <see cref="_idleExpiration"/>, OR its bucket has refilled to full capacity
+/// (a full bucket is indistinguishable from a brand-new one, so dropping it resets nothing). When a NEW key
+/// arrives and the cache is full, only such entries are reclaimed; if none are eligible the new key is
+/// refused (<see cref="TryAcquire"/> returns false → the caller fails closed with 503). Existing partitions
+/// always keep their limiter, even at capacity. Reclaiming full buckets means an attacker who wants to keep
+/// the cache full must keep every one of its partitions drained (re-touch each within one refill period,
+/// seconds to a few minutes), not merely touch it once per idle window (30 minutes by default).</para>
 ///
 /// <para><b>Lifetime invariant:</b> acquisition and removal/disposal are serialized under a single lock,
 /// so a limiter can never be disposed while an acquisition against it is in progress (no use-after-dispose,
 /// no <see cref="ObjectDisposedException"/>, and an in-use partition is never reclaimed underneath a
-/// caller). The token-bucket acquire is an O(1) in-memory operation, so the lock is held only briefly.</para>
+/// caller). The clock is read BEFORE the lock is taken and never inside it: a <see cref="TimeProvider"/> may
+/// run due timer callbacks (the idle sweep) inline on the calling thread, and a sweep re-entering the lock
+/// from inside an acquisition would dispose the very limiter being acquired. The sweep additionally refuses to
+/// run re-entrantly. The token-bucket acquire is an O(1) in-memory operation, so the lock is held only briefly.</para>
 ///
 /// Rate limiting here is single-instance/process-local; a multi-instance deployment needs a separately
 /// designed distributed limiter. The raw partition value is never stored or logged beyond the caller's key.
@@ -61,21 +68,23 @@ public sealed class BoundedRateLimiterCache : IDisposable
     /// </summary>
     public bool TryAcquire(string partitionKey, out RateLimitLease lease)
     {
+        // Read the clock OUTSIDE the lock (see the lifetime invariant).
+        var nowTicks = _clock.GetUtcNow().UtcTicks;
         lock (_gate)
         {
-            if (_disposed || !TryResolveEntryLocked(partitionKey, out var entry))
+            if (_disposed || !TryResolveEntryLocked(partitionKey, nowTicks, out var entry))
             {
                 lease = FailedLease.Instance; // capacity exhausted (or shutting down); not a rate-limit lease
                 return false;
             }
 
-            entry.LastAccessTicks = _clock.GetUtcNow().UtcTicks;
+            entry.LastAccessTicks = nowTicks;
             lease = entry.Limiter.AttemptAcquire(1); // safe: no concurrent Dispose can run under the same lock
             return true;
         }
     }
 
-    private bool TryResolveEntryLocked(string key, out Entry entry)
+    private bool TryResolveEntryLocked(string key, long nowTicks, out Entry entry)
     {
         if (_partitions.TryGetValue(key, out var found))
         {
@@ -85,7 +94,7 @@ public sealed class BoundedRateLimiterCache : IDisposable
 
         if (_partitions.Count >= _maxPartitions)
         {
-            ReclaimIdleLocked(); // reclaim ONLY idle-eligible entries; a live limiter is never sacrificed
+            ReclaimStatelessLocked(nowTicks); // reclaim ONLY entries that carry no state; a live limiter is never sacrificed
             if (_partitions.Count >= _maxPartitions)
             {
                 entry = null!;
@@ -104,28 +113,42 @@ public sealed class BoundedRateLimiterCache : IDisposable
                 QueueLimit = 0,
                 QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
             }),
-            LastAccessTicks = _clock.GetUtcNow().UtcTicks,
+            LastAccessTicks = nowTicks,
         };
         _partitions[key] = created; // only added under the lock after a capacity check → count never exceeds max
         entry = created;
         return true;
     }
 
-    /// <summary>Removes + disposes every entry idle for at least the configured idle expiration. Caller holds the lock.</summary>
-    private void ReclaimIdleLocked()
+    /// <summary>
+    /// Removes + disposes every entry that carries no rate-limit state: idle for at least the configured idle
+    /// expiration, or with a bucket back at full capacity. Caller holds the lock.
+    /// </summary>
+    private void ReclaimStatelessLocked(long nowTicks)
     {
-        var cutoff = _clock.GetUtcNow().UtcTicks - _idleExpiration.Ticks;
+        var cutoff = nowTicks - _idleExpiration.Ticks;
         foreach (var kv in _partitions)
         {
-            if (kv.Value.LastAccessTicks <= cutoff && _partitions.TryRemove(kv.Key, out var removed))
+            if ((kv.Value.LastAccessTicks <= cutoff || IsFull(kv.Value.Limiter)) && _partitions.TryRemove(kv.Key, out var removed))
             {
                 removed.Limiter.Dispose(); // safe: acquisition for the same cache cannot run concurrently
             }
         }
     }
 
+    private bool IsFull(TokenBucketRateLimiter limiter)
+        => limiter.GetStatistics() is { } statistics && statistics.CurrentAvailablePermits >= _policy.TokenLimit;
+
     private void SweepIdle()
     {
+        // Never re-entrantly: a TimeProvider may run this callback inline on a thread that already holds the
+        // lock (inside TryAcquire); reclaiming there could dispose the limiter that thread is acquiring.
+        if (Monitor.IsEntered(_gate))
+        {
+            return;
+        }
+
+        var nowTicks = _clock.GetUtcNow().UtcTicks; // outside the lock, like TryAcquire
         lock (_gate)
         {
             if (_disposed)
@@ -133,7 +156,7 @@ public sealed class BoundedRateLimiterCache : IDisposable
                 return;
             }
 
-            ReclaimIdleLocked();
+            ReclaimStatelessLocked(nowTicks);
         }
     }
 

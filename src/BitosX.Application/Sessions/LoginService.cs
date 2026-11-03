@@ -74,7 +74,11 @@ public sealed class LoginService : ILoginService
         var candidate = await _accounts.GetByNormalizedEmailAsync(normalizedEmail, cancellationToken).ConfigureAwait(false);
 
         // Login-capability gate — NO Argon2 for a non-capable/unknown account (approved DoS decision).
+        // The stored normalized email must equal the one typed EXACTLY (ordinal): the per-email limiter keys on
+        // this string, so a row that only a looser database collation considered equal is not this login. The
+        // column is binary since migration 0007; the check keeps that true on every path, the MFA one included.
         if (candidate is null
+            || !string.Equals(candidate.NormalizedEmail, normalizedEmail, StringComparison.Ordinal)
             || candidate.EmailVerifiedAt is null
             || candidate.PasswordHash is null
             || candidate.DisabledAt is not null)
