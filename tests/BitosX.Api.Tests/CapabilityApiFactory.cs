@@ -19,10 +19,7 @@ public sealed class CapabilityApiFactory : WebApplicationFactory<Program>
     public CapabilityApiFactory(bool verification)
     {
         _verification = verification;
-        var cfg = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
-            .AddUserSecrets("bitosx-infrastructure-tests").Build();
-        _testDbConnectionString = cfg.GetConnectionString("BitosxTest")
-            ?? throw new InvalidOperationException("ConnectionStrings:BitosxTest not configured for tests.");
+        _testDbConnectionString = TestDatabase.ConnectionString;
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)

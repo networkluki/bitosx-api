@@ -37,8 +37,7 @@ public sealed class MigrateCommandTests
     [Fact]
     public async Task AgainstTheTestDatabase_AppliesPendingMigrations_AndExits0_Idempotently()
     {
-        var secrets = new ConfigurationBuilder().AddUserSecrets("bitosx-infrastructure-tests").Build();
-        var migrator = secrets.GetConnectionString("BitosxTest")!;
+        var migrator = TestDatabase.ConnectionString;
 
         var first = await MigrateCommand.RunAsync(Cfg(new() { ["ConnectionStrings:BitosxMigrator"] = migrator }), new StringWriter(), new StringWriter());
         Assert.Equal(MigrateCommand.Success, first);
