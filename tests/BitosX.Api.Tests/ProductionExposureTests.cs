@@ -144,6 +144,46 @@ public sealed class ProductionExposureTests
         Assert.Equal(HttpStatusCode.OK, (await f.CreateClient().GetAsync("/health")).StatusCode);
     }
 
+    // ---- CORS: a loopback http:// origin is a Development/Testing convenience only ----
+
+    [Theory]
+    [InlineData("Security:Cors:AllowedOrigins")]
+    [InlineData("Security:Cors:StatusPageOrigins")]
+    public void Production_LoopbackHttpCorsOrigin_FailsStartup(string key)
+    {
+        using var f = Factory("Production", s => s[key] = "http://127.0.0.1:8788");
+        Assert.Contains("https://", StartupError(f), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Testing")]
+    [InlineData("Development")]
+    public async Task NonProduction_LoopbackHttpCorsOrigin_Starts_AndIsAnswered(string environment)
+    {
+        const string origin = "http://127.0.0.1:8788";
+        using var f = Factory(environment, s => s["Security:Cors:AllowedOrigins"] = origin);
+        var request = new HttpRequestMessage(HttpMethod.Options, "/v1/sync/envelope");
+        request.Headers.Add("Origin", origin);
+        request.Headers.Add("Access-Control-Request-Method", "PUT");
+        var resp = await f.CreateClient().SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NoContent, resp.StatusCode);
+        Assert.Equal(origin, Assert.Single(resp.Headers.GetValues("Access-Control-Allow-Origin")));
+        Assert.Contains("PUT", string.Join(",", resp.Headers.GetValues("Access-Control-Allow-Methods")), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Testing_LoopbackHttpCorsOrigin_DoesNotWidenToOtherHttpOrigins()
+    {
+        using var f = Factory("Testing", s => s["Security:Cors:AllowedOrigins"] = "http://127.0.0.1:8788");
+        var request = new HttpRequestMessage(HttpMethod.Get, "/health");
+        request.Headers.Add("Origin", "http://127.0.0.1:9999");
+        var resp = await f.CreateClient().SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.DoesNotContain(resp.Headers, h => h.Key.StartsWith("Access-Control-", StringComparison.OrdinalIgnoreCase));
+    }
+
     [Fact]
     public async Task Production_LoginDisabled_DoesNotRequireHardening()
     {

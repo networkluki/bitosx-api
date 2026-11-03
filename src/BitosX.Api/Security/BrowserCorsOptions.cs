@@ -22,7 +22,9 @@ namespace BitosX.Api.Security;
 /// Common to both:
 /// <list type="bullet">
 /// <item>exact <c>https://</c> origins only — no wildcard, no <c>http://</c>, no path, no port-less
-/// guessing; a browser's <c>Origin</c> header must match byte for byte;</item>
+/// guessing; a browser's <c>Origin</c> header must match byte for byte. The one exception is a loopback
+/// <c>http://</c> origin (<c>localhost</c>, <c>127.0.0.1</c>, <c>[::1]</c>) in the Development and Testing
+/// environments only, for the local live stack (<c>tools/devstack</c>); Production never accepts it;</item>
 /// <item>methods <c>GET</c>, <c>POST</c>, <c>PUT</c>, <c>DELETE</c> (the surface the web app uses; <c>PUT</c> is
 /// the envelope upload <c>PUT /v1/sync/envelope</c>);</item>
 /// <item>request headers <c>Authorization</c>, <c>Content-Type</c>, <c>Accept</c>;</item>
@@ -78,33 +80,37 @@ public sealed class BrowserCorsOptions
     /// <summary>Any CORS policy is configured, so the CORS middleware must run.</summary>
     public bool AnyEnabled => StatusPolicyEnabled;
 
-    /// <summary>Binds <c>Security:Cors</c> and validates it fail-closed. Throws on any invalid value.</summary>
-    public static BrowserCorsOptions Bind(IConfiguration configuration)
+    /// <summary>
+    /// Binds <c>Security:Cors</c> and validates it fail-closed. Throws on any invalid value.
+    /// <paramref name="allowLoopbackHttp"/> additionally accepts an exact <c>http://</c> loopback origin; the host
+    /// passes <c>true</c> only in the Development and Testing environments (never in Production).
+    /// </summary>
+    public static BrowserCorsOptions Bind(IConfiguration configuration, bool allowLoopbackHttp = false)
     {
         var options = new BrowserCorsOptions();
         configuration.GetSection(SectionName).Bind(options);
-        options.Validate();
+        options.Validate(allowLoopbackHttp);
         return options;
     }
 
     /// <summary>Fail-closed validation of every value. Throws <see cref="InvalidOperationException"/> on the first problem.</summary>
-    public void Validate()
+    public void Validate(bool allowLoopbackHttp = false)
     {
         if (PreflightMaxAgeSeconds < 0 || PreflightMaxAgeSeconds > MaxPreflightMaxAgeSeconds)
         {
             throw new InvalidOperationException($"{SectionName}:PreflightMaxAgeSeconds must be between 0 and {MaxPreflightMaxAgeSeconds}.");
         }
 
-        Origins = ParseOrigins(AllowedOrigins, "AllowedOrigins");
-        StatusOrigins = ParseOrigins(StatusPageOrigins, "StatusPageOrigins");
+        Origins = ParseOrigins(AllowedOrigins, "AllowedOrigins", allowLoopbackHttp);
+        StatusOrigins = ParseOrigins(StatusPageOrigins, "StatusPageOrigins", allowLoopbackHttp);
     }
 
-    private static IReadOnlyList<string> ParseOrigins(string? list, string key)
+    private static IReadOnlyList<string> ParseOrigins(string? list, string key, bool allowLoopbackHttp)
     {
         var origins = new List<string>();
         foreach (var raw in (list ?? string.Empty).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            var origin = ValidateOrigin(raw, key);
+            var origin = ValidateOrigin(raw, key, allowLoopbackHttp);
             if (origins.Contains(origin, StringComparer.Ordinal))
             {
                 throw new InvalidOperationException($"{SectionName}:{key} lists '{origin}' more than once.");
@@ -117,10 +123,12 @@ public sealed class BrowserCorsOptions
 
     /// <summary>
     /// An allowed origin is exactly <c>https://host[:port]</c>, in lowercase, with nothing else: no
-    /// wildcard, no <c>http://</c> (also not for loopback — the web app is tested against a mock, not a
-    /// plaintext origin), no userinfo, no path (not even a trailing slash), no query, no fragment.
+    /// wildcard, no <c>http://</c>, no userinfo, no path (not even a trailing slash), no query, no fragment.
+    /// With <paramref name="allowLoopbackHttp"/> (Development/Testing only) an <c>http://</c> origin whose host
+    /// is loopback (<c>localhost</c>, <c>127.0.0.1</c>, <c>[::1]</c>) is also accepted, under the same
+    /// exact-spelling rules — the local live stack serves the web vault from such an origin.
     /// </summary>
-    private static string ValidateOrigin(string origin, string key)
+    private static string ValidateOrigin(string origin, string key, bool allowLoopbackHttp)
     {
         if (origin.Length > MaxOriginLength || origin.Any(char.IsWhiteSpace) || origin.Any(char.IsControl))
         {
@@ -130,9 +138,11 @@ public sealed class BrowserCorsOptions
         {
             throw new InvalidOperationException($"{SectionName}:{key} must list exact origins; wildcards are not permitted ('{origin}').");
         }
-        if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri) || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
+        if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri) || !IsAcceptedScheme(uri, allowLoopbackHttp))
         {
-            throw new InvalidOperationException($"{SectionName}:{key} entry '{origin}' must be an absolute https:// origin.");
+            throw new InvalidOperationException(allowLoopbackHttp
+                ? $"{SectionName}:{key} entry '{origin}' must be an absolute https:// origin (http:// only for a loopback host)."
+                : $"{SectionName}:{key} entry '{origin}' must be an absolute https:// origin.");
         }
         if (uri.UserInfo.Length > 0 || string.IsNullOrEmpty(uri.Host))
         {
@@ -151,6 +161,12 @@ public sealed class BrowserCorsOptions
 
         return origin;
     }
+
+    private static bool IsAcceptedScheme(Uri uri, bool allowLoopbackHttp)
+        => string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)
+           || (allowLoopbackHttp
+               && string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal)
+               && (uri.IsLoopback || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)));
 
     /// <summary>The CORS policy for the browser client(s), the default for every endpoint. Requires a validated, enabled instance.</summary>
     public CorsPolicy BuildPolicy()

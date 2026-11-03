@@ -82,7 +82,9 @@ builder.WebHost.ConfigureKestrel(options =>
 // Bound + validated fail-closed at startup (exact https origins only, no credentials). With both
 // Security:Cors:AllowedOrigins and Security:Cors:StatusPageOrigins empty, no CORS middleware is registered
 // and no CORS header is emitted. See BrowserCorsOptions for the policies and their rationale.
-var corsOptions = BrowserCorsOptions.Bind(builder.Configuration);
+// A loopback http:// origin (the local live stack, tools/devstack) is accepted only in Development/Testing.
+var allowLoopbackHttpOrigins = builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing");
+var corsOptions = BrowserCorsOptions.Bind(builder.Configuration, allowLoopbackHttpOrigins);
 builder.Services.AddSingleton(corsOptions);
 if (corsOptions.AnyEnabled)
 {
@@ -135,8 +137,7 @@ if (capabilities.AccountCoreEnabled)
     if (capabilities.EmailVerificationEnabled)
     {
         // Email:PublicBaseUrl must be https (fail closed); a loopback http URL is accepted only in Development/Testing.
-        var allowLoopbackHttpBaseUrl = builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing");
-        builder.Services.AddBitosxEmailVerification(builder.Configuration, bitosxConnectionString!, allowLoopbackHttpBaseUrl);
+        builder.Services.AddBitosxEmailVerification(builder.Configuration, bitosxConnectionString!, allowLoopbackHttpOrigins);
     }
 
     // EmailDelivery (SMTP sender + background dispatcher) is registered ONLY when SMTP
