@@ -10,7 +10,7 @@ Requirements: Linux with bash ≥ 4.4, Docker, the .NET 10 SDK, `curl`, `openssl
 ## Commands
 
 ```bash
-tools/devstack/up.sh        # bring up (or replace) the stack; ~15 s, ~5 s with BITOSX_DEVSTACK_SKIP_BUILD=1
+tools/devstack/up.sh        # bring up (or replace) the stack; 10-15 s (5-12 s with BITOSX_DEVSTACK_SKIP_BUILD=1)
 tools/devstack/selftest.sh  # one account through every flow with curl (uses only the three client variables)
 tools/devstack/smoke.sh     # black-box checks of a Production-configured API (separate port, see below)
 tools/devstack/down.sh      # stop the API, remove the container; safe to run any time
