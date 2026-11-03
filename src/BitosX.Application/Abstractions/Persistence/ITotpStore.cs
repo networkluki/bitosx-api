@@ -57,6 +57,10 @@ public interface ITotpStore
     /// <summary>Replaces every recovery code of a confirmed enrollment. Returns false when TOTP is not confirmed.</summary>
     Task<bool> ReplaceRecoveryCodesAsync(Guid accountId, IReadOnlyList<byte[]> recoveryCodeVerifiers, DateTime nowUtc, CancellationToken cancellationToken = default);
 
-    /// <summary>Removes the TOTP row, every recovery code and every open second-step challenge of the account.</summary>
-    Task DisableAsync(Guid accountId, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Removes the TOTP row, every recovery code and every open second-step challenge of the account — unless the
+    /// account has passkeys (they exist only on top of TOTP): then nothing changes and the result is false. The check
+    /// runs under the TOTP row lock, so a concurrent passkey registration cannot slip in between.
+    /// </summary>
+    Task<bool> DisableAsync(Guid accountId, CancellationToken cancellationToken = default);
 }

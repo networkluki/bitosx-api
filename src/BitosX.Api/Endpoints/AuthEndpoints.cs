@@ -256,7 +256,8 @@ public static class AuthEndpoints
                     result.AccessToken!, result.AccessTokenExpiresAt, result.RefreshToken!, result.RefreshTokenExpiresAt)),
                 // Password accepted, second factor required: 202 with the one-step challenge token, no session yet.
                 LoginOutcome.MfaRequired => Results.Json(
-                    new MfaChallengeResponse(result.MfaToken!, result.MfaTokenExpiresAt), statusCode: StatusCodes.Status202Accepted),
+                    new MfaChallengeResponse(result.MfaToken!, result.MfaTokenExpiresAt, Methods: result.MfaMethods ?? ["totp", "recovery"]),
+                    statusCode: StatusCodes.Status202Accepted),
                 // TOTP required but the server cannot verify codes: refuse (never a password-only session).
                 LoginOutcome.MfaUnavailable => SecondFactorUnavailable(),
                 _ => InvalidCredentials(),

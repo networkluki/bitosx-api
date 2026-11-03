@@ -75,9 +75,12 @@ public sealed record SessionResponse(Guid Id, DateTime CreatedAt, DateTime LastS
 /// <summary>
 /// Answer to <c>POST /v1/auth/login</c> (HTTP 202) when the account has a second factor: the password was
 /// accepted, no session exists yet, and the client must present <see cref="MfaToken"/> with a code at
-/// <c>POST /v1/auth/login/totp</c> before it expires. The token is an opaque bearer secret for that one step.
+/// <c>POST /v1/auth/login/totp</c> (or a passkey at <c>POST /v1/auth/login/passkey</c>) before it expires. The
+/// token is an opaque bearer secret for that one step. <see cref="Method"/> stays <c>"totp"</c> for older clients;
+/// <see cref="Methods"/> lists every way the step can be completed: <c>"totp"</c>, <c>"recovery"</c> and, when the
+/// account has passkeys and the server offers them, <c>"passkey"</c>. Clients ignore values they do not know.
 /// </summary>
-public sealed record MfaChallengeResponse(string MfaToken, DateTime MfaTokenExpiresAt, string Method = "totp");
+public sealed record MfaChallengeResponse(string MfaToken, DateTime MfaTokenExpiresAt, string Method = "totp", IReadOnlyList<string>? Methods = null);
 
 /// <summary>Second sign-in step: the challenge token from step one and a TOTP code or a recovery code.</summary>
 public sealed record TotpLoginRequest(string MfaToken, string Code);

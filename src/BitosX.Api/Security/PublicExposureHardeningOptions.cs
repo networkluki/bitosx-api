@@ -49,6 +49,12 @@ public sealed class PublicExposureHardeningOptions
     /// <summary>TOTP enrollment/confirm/disable/recovery-code calls per account (phase 7): each is password- and/or code-confirmed.</summary>
     public TokenBucketPolicyOptions TotpManagePerAccount { get; set; } = new() { TokenLimit = 10, TokensPerPeriod = 2, ReplenishmentSeconds = 60 };
 
+    /// <summary>
+    /// Passkey sign-in without email and password (phase 10), per trusted client IP: both the options request (which
+    /// stores a short-lived challenge) and the assertion. A sign-in takes two requests.
+    /// </summary>
+    public TokenBucketPolicyOptions PasskeyPerAddress { get; set; } = new() { TokenLimit = 20, TokensPerPeriod = 10, ReplenishmentSeconds = 60 };
+
     public PartitionStateOptions PartitionState { get; set; } = new();
 
     /// <summary>Process-wide login admission budget (2D.2). Gated by <see cref="Enabled"/>.</summary>
@@ -71,6 +77,7 @@ public sealed class PublicExposureHardeningOptions
         MfaPerIp.Validate($"{SectionName}:MfaPerIp");
         MfaPerAccount.Validate($"{SectionName}:MfaPerAccount");
         TotpManagePerAccount.Validate($"{SectionName}:TotpManagePerAccount");
+        PasskeyPerAddress.Validate($"{SectionName}:PasskeyPerAddress");
         PartitionState.Validate($"{SectionName}:PartitionState");
         GlobalLoginBudget.Validate($"{SectionName}:GlobalLoginBudget");
         LoginJitter.Validate($"{SectionName}:LoginJitter");

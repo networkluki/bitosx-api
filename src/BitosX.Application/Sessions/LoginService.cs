@@ -3,6 +3,7 @@ using System.Text;
 using BitosX.Application.Abstractions.Persistence;
 using BitosX.Application.Accounts;
 using BitosX.Application.Mfa;
+using BitosX.Application.Passkeys;
 using BitosX.Application.Security;
 
 namespace BitosX.Application.Sessions;
@@ -29,6 +30,8 @@ public sealed class LoginService : ILoginService
     private readonly TotpOptions _totpOptions;
     private readonly SecondFactorAvailability _secondFactor;
     private readonly TimeProvider _clock;
+    private readonly IPasskeyStore? _passkeys;
+    private readonly PasskeyAvailability _passkeyAvailability;
 
     public LoginService(
         IAccountRepository accounts,
@@ -40,7 +43,9 @@ public sealed class LoginService : ILoginService
         IMfaChallengeStore mfaChallenges,
         TotpOptions totpOptions,
         SecondFactorAvailability secondFactor,
-        TimeProvider clock)
+        TimeProvider clock,
+        IPasskeyStore? passkeys = null,
+        PasskeyAvailability? passkeyAvailability = null)
     {
         _accounts = accounts;
         _passwordHasher = passwordHasher;
@@ -52,6 +57,8 @@ public sealed class LoginService : ILoginService
         _totpOptions = totpOptions;
         _secondFactor = secondFactor;
         _clock = clock;
+        _passkeys = passkeys;
+        _passkeyAvailability = passkeyAvailability ?? PasskeyAvailability.Off;
     }
 
     public async Task<LoginResult> LoginAsync(LoginCommand command, CancellationToken cancellationToken = default)
@@ -113,7 +120,7 @@ public sealed class LoginService : ILoginService
                 await _mfaChallenges.CreateAsync(new MfaChallenge(
                     Guid.NewGuid(), candidate.Id, mfa.Verifier, PasswordHashFingerprint(candidate.PasswordHash),
                     command.UserAgent, now, expiresAt), cancellationToken).ConfigureAwait(false);
-                return LoginResult.MfaRequired(mfa.TokenBase64Url, expiresAt);
+                return LoginResult.MfaRequired(mfa.TokenBase64Url, expiresAt, await MfaMethodsAsync(candidate.Id, cancellationToken).ConfigureAwait(false));
             }
             finally
             {
@@ -150,6 +157,16 @@ public sealed class LoginService : ILoginService
             CryptographicOperations.ZeroMemory(generated.Verifier);
         }
     }
+
+    private static readonly IReadOnlyList<string> CodeMethods = ["totp", "recovery"];
+    private static readonly IReadOnlyList<string> CodeAndPasskeyMethods = ["totp", "recovery", "passkey"];
+
+    /// <summary>The second-step methods: codes always; a passkey when the server offers passkeys and the account has one.</summary>
+    private async Task<IReadOnlyList<string>> MfaMethodsAsync(Guid accountId, CancellationToken cancellationToken)
+        => _passkeyAvailability.Enabled && _passkeys is not null
+           && await _passkeys.CountAsync(accountId, cancellationToken).ConfigureAwait(false) > 0
+            ? CodeAndPasskeyMethods
+            : CodeMethods;
 
     /// <summary>SHA-256 of the PHC string: lets the second step detect a password change without storing the hash twice.</summary>
     public static byte[] PasswordHashFingerprint(string passwordHashPhc) => SHA256.HashData(Encoding.UTF8.GetBytes(passwordHashPhc));

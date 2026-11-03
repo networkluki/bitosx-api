@@ -49,6 +49,9 @@ public sealed record LoginResult
     public string? MfaToken { get; init; }
     public DateTime MfaTokenExpiresAt { get; init; }
 
+    /// <summary>With <see cref="LoginOutcome.MfaRequired"/>: how the second step can be completed (<c>totp</c>, <c>recovery</c>, <c>passkey</c>).</summary>
+    public IReadOnlyList<string>? MfaMethods { get; init; }
+
     /// <summary>With <see cref="LoginOutcome.RateLimited"/>: when the caller may try again, if known.</summary>
     public TimeSpan? RetryAfter { get; init; }
 
@@ -60,8 +63,8 @@ public sealed record LoginResult
 
     public static LoginResult MfaUnavailable { get; } = new() { Outcome = LoginOutcome.MfaUnavailable };
 
-    public static LoginResult MfaRequired(string mfaToken, DateTime expiresAt)
-        => new() { Outcome = LoginOutcome.MfaRequired, MfaToken = mfaToken, MfaTokenExpiresAt = expiresAt };
+    public static LoginResult MfaRequired(string mfaToken, DateTime expiresAt, IReadOnlyList<string>? methods = null)
+        => new() { Outcome = LoginOutcome.MfaRequired, MfaToken = mfaToken, MfaTokenExpiresAt = expiresAt, MfaMethods = methods };
 
     public static LoginResult Succeeded(string accessToken, DateTime accessTokenExpiresAt, string refreshToken, DateTime refreshTokenExpiresAt)
         => new()

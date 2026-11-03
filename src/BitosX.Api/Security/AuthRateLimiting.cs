@@ -43,6 +43,9 @@ public sealed class AuthRateLimiters : IDisposable
     /// <summary>TOTP management, partitioned by the authenticated account id.</summary>
     public BoundedRateLimiterCache TotpManagePerAccount { get; }
 
+    /// <summary>Passkey sign-in without email and password, partitioned by trusted client IP.</summary>
+    public BoundedRateLimiterCache PasskeyPerAddress { get; }
+
     /// <summary>One process-wide token bucket shared across all IPs and all accounts/emails (no partition key).</summary>
     public TokenBucketRateLimiter GlobalLoginBudget { get; }
 
@@ -60,6 +63,7 @@ public sealed class AuthRateLimiters : IDisposable
         MfaPerIp = new BoundedRateLimiterCache(options.MfaPerIp, options.PartitionState.MaxIpPartitions, idle, clock);
         MfaPerAccount = new BoundedRateLimiterCache(options.MfaPerAccount, options.PartitionState.MaxEmailPartitions, idle, clock);
         TotpManagePerAccount = new BoundedRateLimiterCache(options.TotpManagePerAccount, options.PartitionState.MaxEmailPartitions, idle, clock);
+        PasskeyPerAddress = new BoundedRateLimiterCache(options.PasskeyPerAddress, options.PartitionState.MaxIpPartitions, idle, clock);
         GlobalLoginBudget = new TokenBucketRateLimiter(new TokenBucketRateLimiterOptions
         {
             TokenLimit = options.GlobalLoginBudget.TokenLimit,
@@ -84,6 +88,7 @@ public sealed class AuthRateLimiters : IDisposable
         MfaPerIp.Dispose();
         MfaPerAccount.Dispose();
         TotpManagePerAccount.Dispose();
+        PasskeyPerAddress.Dispose();
         GlobalLoginBudget.Dispose();
     }
 }
@@ -131,6 +136,10 @@ public static class AuthRateLimiting
     /// <summary>Per-IP second-sign-in-step limit; same 503-on-unresolvable-IP behavior.</summary>
     public static async ValueTask<object?> MfaPerIpFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
         => await PerIpAsync(context, next, static r => r.MfaPerIp);
+
+    /// <summary>Per-IP passwordless passkey sign-in limit (options and assertion); same 503-on-unresolvable-IP behavior.</summary>
+    public static async ValueTask<object?> PasskeyPerAddressFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
+        => await PerIpAsync(context, next, static r => r.PasskeyPerAddress);
 
     /// <summary>Per-IP forgot/reset-password limit; same 503-on-unresolvable-IP behavior.</summary>
     public static async ValueTask<object?> PasswordResetPerIpFilter(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
