@@ -1,8 +1,8 @@
 # BitosX API — Persistence
 
-Status: **Persistence Foundation.** Schema and data-access plumbing exist; no
-account/auth behavior (registration, login, token issuance, email/SMS) is
-implemented yet.
+Schema (migrations 0001–0008) and data access for accounts, email verification and password reset,
+sessions and refresh tokens, TOTP, the email outbox and the encrypted-envelope sync. Phone/SMS
+tables exist but no SMS behavior is implemented.
 
 ## Engine and data-access stack
 
@@ -99,7 +99,7 @@ The runtime account performs only DML on these tables; the migrator applies `000
 
 `0003_vault_sync.sql` adds `vault_blobs`: one row per account — `account_id` PK (FK → accounts,
 `ON DELETE CASCADE`), `revision BIGINT` (compare-and-set, starts at 1), `size_bytes`,
-`fingerprint VARBINARY(32)` (SHA-256 of the envelope bytes, public), `envelope MEDIUMBLOB` (the
+`fingerprint VARBINARY(32)` (SHA-256 of the envelope bytes, public), `envelope MEDIUMBLOB` (LONGBLOB since 0006; the
 desktop vault file as uploaded: ciphertext the server cannot read), `created_at`, `updated_at`.
 
 The zero-knowledge exclusions above are unchanged: the envelope is ciphertext under a key the server
@@ -109,13 +109,34 @@ account row, then the envelope row, and writes only if the client's base revisio
 **Host requirement:** a 16 MiB envelope needs `max_allowed_packet >= 32M` on the MariaDB server
 (the default 16M is not enough for the largest allowed row plus protocol overhead).
 
+## Migrations 0006–0008 (phase 8)
+
+- **0006** `vault_blobs.envelope` → `LONGBLOB NULL`, `fingerprint` → `NULL`. `MEDIUMBLOB` held one byte
+  less than the 16 MiB the API accepts. A delete keeps the row as a tombstone (`envelope IS NULL`,
+  `size_bytes = 0`) so the next upload continues at the last revision + 1 (revisions never restart).
+- **0007** `accounts.normalized_email` and `accounts.password_hash` → `utf8mb4_bin`. Equality and
+  uniqueness are byte-exact: accent/width variants are distinct accounts, and the exact-hash
+  re-checks cannot ignore letter case.
+- **0008** `email_outbox.payload_ciphertext` → `VARBINARY(4096)` (a maximal non-ASCII address needs
+  ~2.1 KB); recovery-code verifiers unique per account (`UNIQUE (account_id, code_hash)`) instead of
+  globally; indexes for batched retention/housekeeping deletes: `email_outbox(created_at)`,
+  `email_verification_challenges(expires_at)`, `mfa_challenges(expires_at)`, `sessions(revoked_at)`,
+  `sessions(absolute_expires_at)`, `sessions(last_seen_at)`.
+
+All timestamps are UTC `DATETIME(6)`; every connection forces MySqlConnector's `DateTimeKind=Utc`, so
+values read back are `DateTimeKind.Utc`.
+
 ## Migration procedure
 
 1. Author the next script as `NNNN_description.sql` under
-   `src/BitosX.Infrastructure/Persistence/Migrations/` (embedded resource).
+   `src/BitosX.Infrastructure/Persistence/Migrations/` (embedded resource). Use SQL that runs on both
+   MariaDB 11.8 (production) and MySQL 8 (the test database).
 2. Review the SQL before applying.
-3. `SqlMigrationRunner.ApplyMigrationsAsync` applies pending scripts in order and
-   records them; already-applied scripts are skipped.
+3. Deploy: `dotnet BitosX.Api.dll migrate` (schema-management account,
+   `ConnectionStrings:BitosxMigrator`) applies pending scripts in order under an advisory lock and
+   records each only after it fully succeeded; already-applied scripts are skipped. DDL commits
+   implicitly, so a script that fails part-way is not recorded and the command names it: inspect and,
+   if needed, repair that script's changes before running again. The web host never migrates.
 4. Integration tests apply migrations to `bitosx_test` on startup.
 
 ## Backup considerations (future)

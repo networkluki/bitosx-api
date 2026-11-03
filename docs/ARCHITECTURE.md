@@ -62,19 +62,22 @@ Cloudflare
   **loopback proxies only** (`127.0.0.1`, `::1`), never from arbitrary
   networks. Cloudflare-origin / real-client-IP handling will be designed at the
   Apache layer and reviewed before any public exposure.
-- During this phase Apache does **not** yet proxy to Kestrel.
+- In production Apache proxies to Kestrel over loopback; see `DEPLOYMENT.md` for the host-side
+  checklist.
 
 ## Endpoint organization
 
 - **Infrastructure endpoints** are unversioned: `/health`, `/version`.
-- **Business endpoints** will live under a versioned group: `/v1/...`
-  (e.g. `/v1/auth/...`, `/v1/account/...`). The `/v1` route group exists as a
-  seam (`ApiV1Endpoints.MapApiV1`) but has no endpoints yet.
+- **Business endpoints** live under `/v1/...`: `/v1/auth/*` (`AuthEndpoints`),
+  `/v1/account/*` (`AccountEndpoints`), `/v1/sync/*` (`SyncEndpoints`), each mapped only when its
+  capability is enabled.
+- **`migrate`** (`Hosting/MigrateCommand`): `dotnet BitosX.Api.dll migrate` applies schema
+  migrations and exits; the web host is never built in that mode.
 
 ## Persistence boundary
 
-The Persistence Foundation is in place (schema + data access only; no
-account/auth behavior yet). Details in [`PERSISTENCE.md`](PERSISTENCE.md).
+Schema, data access and the account subsystem are in place. Details in
+[`PERSISTENCE.md`](PERSISTENCE.md).
 
 - Engine: **MariaDB 11.8**, isolated `bitosx` database (tests use `bitosx_test`),
   loopback-only (`127.0.0.1:3306`).

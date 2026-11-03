@@ -232,8 +232,9 @@ public static class AuthEndpoints
                 return CapacityUnavailable(http); // Argon2 admission overload → 503 (never a credential 401)
             }
 
-            // Defense-in-depth jitter applies ONLY to the normal credential outcomes (200 / generic 401),
-            // after credential evaluation. Genuine cancellation stays cancellation; an unexpected jitter
+            // Defense-in-depth jitter applies to every outcome the login service returns (200, generic 401,
+            // 202 second factor required, 503 two-factor unavailable), after credential evaluation — not to the
+            // Argon2-capacity 503 above. It does not hide the Argon2 cost (see SECURITY_MODEL). Genuine cancellation stays cancellation; an unexpected jitter
             // failure fails closed.
             try
             {

@@ -1,35 +1,33 @@
 # BitosX API
 
-Account/API service for BitosX. This repository currently contains the
-**API foundation** only.
+Account/API service for BitosX: accounts, sessions and the zero-knowledge encrypted-envelope sync
+for the BitosX desktop and web vault clients.
 
-> **Status: local development, not production-ready.**
-> Account registration and authentication are **not implemented yet**. The API
-> is bound to loopback and is **not** exposed publicly. Do not treat a working
-> foundation as a green light for public go-live — see
+> **Status.** The API runs behind Cloudflare → Apache → loopback Kestrel at `api.bitosx.se`.
+> Public exposure depends on the host-side checklist in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
+> (every **[host]** item verified) and the security model in
 > [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md).
 
 ## What this currently implements
 
-- ASP.NET Core (.NET 10) host on Kestrel, **loopback-only** (`127.0.0.1:5080`).
-- Infrastructure endpoints:
-  - `GET /health` — liveness only (no database/dependency readiness claim).
-  - `GET /version` — non-sensitive product/build version.
-- Baseline: RFC7807 ProblemDetails error handling, correlation id per request,
-  structured logging, OpenAPI document, loopback-only forwarded-header trust,
-  conservative request-body-size limit.
-- A modular-monolith project layout (`Api` / `Application` / `Infrastructure` /
-  `Contracts`) that establishes the architecture for future account/auth work.
+- ASP.NET Core (.NET 10) host on Kestrel, **loopback-only** (`127.0.0.1:5080`), fail-closed
+  production checks (hardening required, loopback listener only).
+- Infrastructure endpoints `GET /health` (liveness only) and `GET /version`.
+- Email-first registration with email verification, login with refresh-token rotation and
+  sessions, password reset by emailed link, password change while signed in, password-confirmed
+  account deletion, TOTP two-factor sign-in with recovery codes, and encrypted-envelope sync.
+- Rate limiting, bounded Argon2id work, CORS for the web vault (and `/health`+`/version` for the
+  product page), RFC7807 ProblemDetails, correlation ids, UTC timestamps, background outbox
+  delivery and housekeeping.
+- OpenAPI document in the Development environment only.
+- A modular-monolith layout (`Api` / `Application` / `Infrastructure` / `Contracts`).
 
 See [`docs/API.md`](docs/API.md) for endpoint details and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the project layout.
 
 ## What is NOT implemented yet
 
-SMS verification and CAPTCHA. (Registration with email verification,
-login/refresh/logout, sessions, encrypted-envelope sync, password reset by emailed
-link, password-confirmed account deletion, and TOTP two-factor sign-in exist; see
-`docs/API.md`.)
+SMS verification and CAPTCHA.
 
 ## Requirements
 
@@ -56,6 +54,13 @@ ASPNETCORE_URLS="http://127.0.0.1:5080" \
   dotnet run --project src/BitosX.Api -c Release --no-launch-profile
 ```
 
+Apply schema migrations (schema-management account, `ConnectionStrings:BitosxMigrator`; the web
+host never migrates and never reads that secret):
+
+```bash
+dotnet run --project src/BitosX.Api -c Release --no-launch-profile -- migrate
+```
+
 Quick check once running:
 
 ```bash
@@ -63,11 +68,11 @@ curl http://127.0.0.1:5080/health
 curl http://127.0.0.1:5080/version
 ```
 
-## Current local architecture
+## Architecture
 
 ```
-Cloudflare -> Apache :443 -> [FUTURE reverse proxy] -> Kestrel 127.0.0.1:5080 -> BitosX.Api
+Cloudflare -> Apache :443 (reverse proxy) -> Kestrel 127.0.0.1:5080 -> BitosX.Api
 ```
 
-During this phase Apache does **not** proxy to Kestrel; the reverse-proxy hop is
-future work.
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for what the application enforces and what must be
+verified on the host.

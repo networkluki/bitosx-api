@@ -1,18 +1,31 @@
 # BitosX API — Endpoints
 
-Base (local, this phase): `http://127.0.0.1:5080`
+Base: `https://api.bitosx.se` in production (Cloudflare → Apache → loopback Kestrel);
+`http://127.0.0.1:5080` locally.
 
-All responses are JSON (`application/json`) with camelCase property names.
+All responses are JSON (`application/json`) with camelCase property names. **Null fields are
+omitted** (a `null` value is never written; a client treats a missing optional field as null).
 Error responses use RFC7807 ProblemDetails. Every response carries an
 `X-Correlation-ID` header.
 
+**Timestamps.** Every timestamp is UTC in ISO 8601 with an explicit `Z`
+(`2026-01-01T00:15:00.123456Z`), including values read from the database (the connection
+forces UTC). Clients still treat a timestamp without an offset as UTC.
+
 **Browser clients (CORS).** Only the origins listed in `Security:Cors:AllowedOrigins`
 (repository default: `https://vault.bitosx.se`, the web account app) may read responses
-from a browser. Allowed methods `GET`/`POST`/`DELETE`, request headers
-`Authorization`/`Content-Type`/`Accept`, exposed headers `Retry-After`/`X-Correlation-ID`,
-no credentials; a preflight (`OPTIONS` + `Access-Control-Request-Method`) is answered with
-**204** before any endpoint runs. Other origins get no CORS headers. See
+from a browser. Allowed methods `GET`/`POST`/`PUT`/`DELETE` (`PUT` is the envelope upload),
+request headers `Authorization`/`Content-Type`/`Accept`, exposed headers
+`Retry-After`/`X-Correlation-ID`, no credentials; a preflight (`OPTIONS` +
+`Access-Control-Request-Method`) is answered with **204** before any endpoint runs. The
+origins in `Security:Cors:StatusPageOrigins` (repository default: `https://bitosx.se`, the
+product page) may read **only** `GET /health` and `GET /version` (method `GET` only); every
+other endpoint gives them no CORS headers. Other origins get no CORS headers. See
 [`SECURITY_MODEL.md`](SECURITY_MODEL.md) — "Browser clients (CORS)".
+
+**Request bodies.** Auth and account endpoints refuse a declared `Content-Length` over **4 KiB**
+with **413** before the handler runs; a body without `Content-Length` is bounded by Kestrel's 64 KB
+cap (also **413**). Only `PUT /v1/sync/envelope` accepts more.
 
 > **Implemented account endpoints:** email-first registration and email
 > ownership verification with account-password creation (`/v1/auth/register`,
@@ -24,7 +37,8 @@ no credentials; a preflight (`OPTIONS` + `Access-Control-Request-Method`) is ans
 > **Password reset by emailed link** (`/v1/auth/forgot-password`, `/v1/auth/reset-password`) and
 > **password-confirmed account deletion** (`POST /v1/account/delete`) exist since phase 6. **TOTP
 > two-factor sign-in** (`POST /v1/auth/login/totp`, `/v1/account/totp/*`) exists since phase 7 and is
-> exposed when the **Totp** capability is enabled (`Security:TotpKey`). **Phone/SMS does not exist yet.** Registration/verification/password reset are exposed when
+> exposed when the **Totp** capability is enabled (`Security:TotpKey`). **Password change while signed
+> in** (`POST /v1/account/password`) exists since phase 8. **Phone/SMS does not exist yet.** Registration/verification/password reset are exposed when
 > EmailVerification is configured; **login/refresh/logout and the account
 > endpoints are exposed independently when the Login capability is enabled** (DB
 > connection + JWT signing key + kid), even without SMTP. The API otherwise stays
@@ -57,8 +71,10 @@ Verification + password + challenge-consume are applied atomically.
 Request: `{ "token": "<base64url>", "password": "<12..128>" }` → **200 OK**
 `{ "message": "Your email is verified and your password is set." }`
 
-Invalid/expired/consumed/invalidated token → **400** generic ProblemDetails.
+Invalid/expired/consumed/invalidated, missing or `null` token → **400** generic ProblemDetails
+(`detail: "Invalid or expired verification token."`).
 Password outside 12–128 → **400** ProblemDetails (challenge not consumed).
+Argon2 admission overload → **503** (`Retry-After: 1`); the token stays usable.
 
 ## `POST /v1/auth/resend-verification`
 
@@ -76,7 +92,9 @@ Starts an **account-password reset** by email. Accepts only an email. For a veri
 account with a password it queues a reset email (to the address on the account, never the one
 typed) carrying a single-use link `https://vault.bitosx.se/reset-password#token=<base64url>`
 (token in the URL fragment, TTL 30 minutes). For an unknown, unverified or disabled address it
-does nothing. The response is **identical in every case**:
+does nothing. The response **status and body are identical in every case** (the response time is
+not: an eligible account costs a database transaction an unknown address does not, so a precise
+timing measurement can still tell them apart; see SECURITY_MODEL "Anti-enumeration: what holds"):
 
 Request: `{ "email": "user@example.com" }` → **202 Accepted**
 `{ "message": "If an account exists for this address, check your email for a password-reset link." }`
@@ -129,10 +147,16 @@ Request: `{ "email": "user@example.com", "password": "<12..128>" }` → **200 OK
 
 - **Every** credential failure (unknown email, wrong password, unverified,
   disabled, null password hash, invalid email format) → one identical generic
-  **401** `application/problem+json` (`detail: "Invalid email or password."`) —
-  no account-existence signal. No Argon2 runs for a non-login-capable account.
-- Malformed JSON → **400**. Request body over **4 KiB** → **413** (before any
-  credential evaluation).
+  **401** `application/problem+json` (`detail: "Invalid email or password."`): the
+  status and body never say whether the account exists. **No Argon2 runs for a
+  non-login-capable account** (an approved DoS trade-off), so the response time
+  still differs: an unknown address answers without the ~0.2–0.4 s hash, only
+  partly masked by the 25–75 ms jitter, and while the Argon2 queue is full only a
+  login-capable account gets the **503**. Rate limits bound how often this can be
+  probed; see SECURITY_MODEL "Anti-enumeration: what holds".
+- Malformed JSON → **400**. Request body over **4 KiB** → **413** (when
+  `Content-Length` is declared, before any credential evaluation; otherwise the
+  64 KB Kestrel cap applies).
 - The access token is a short-lived HS256 JWT (mandatory `kid`); the refresh
   token is an opaque rotating credential. The response contains no account id,
   email, session id, password, or token verifier.
@@ -159,12 +183,16 @@ Request: `{ "mfaToken": "<from the 202>", "code": "123456" }` → **200 OK** (`T
 
 - Every failure (unknown/expired/spent token, wrong code, replayed code, used recovery code,
   password changed between the steps, TOTP disabled meanwhile) → one identical generic **401**
-  (`detail: "Invalid or expired sign-in code."`). No attempts-left hint. After **5** wrong codes the
-  challenge is spent and the password must be entered again.
+  (`detail: "Invalid or expired sign-in code."`). No attempts-left hint. Each request reserves one
+  of the challenge's **5** attempts atomically *before* its code is checked, so even parallel
+  requests get at most 5 code checks per challenge; after that the challenge is spent and the
+  password must be entered again.
 - A TOTP code is accepted within ±1 step (30 s) of the server's clock and **once**: the step is
   recorded and no code for it, or for an older step, is accepted again. A recovery code is single use.
 - Totp capability off → **503**. Body over **4 KiB** → **413**. Under hardening a per-IP limit
-  (10 burst / 5 per 30 s) applies → **429**.
+  (10 burst / 5 per 30 s) and a per-account limit across all of the account's challenges
+  (`MfaPerAccount`, 10 burst / 2 per 60 s, keyed by the account the challenge names) apply →
+  generic **429** (`Retry-After`); a per-account limiter at capacity → **503**.
 
 ## `POST /v1/auth/refresh`
 
@@ -224,6 +252,8 @@ view, not history): `revoked_at IS NULL ∧ absolute_expires_at > now ∧ (now �
 [ { "id": "<guid>", "createdAt": "…", "lastSeenAt": "…", "expiresAt": "…", "current": true } ]
 ```
 
+- At most **200** sessions are returned, newest (`createdAt`) first. Clients size their
+  reads for that (≥ 128 KiB).
 - `expiresAt` is the **effective** expiry `min(absolute_expires_at, last_seen_at +
   IdleLifetime)`, computed by the session service (not the endpoint).
 - `current` marks the calling session. Another account's sessions can never appear.
@@ -246,21 +276,50 @@ Ownership is determined server-side from the validated JWT identity. → **204 N
 ## `POST /v1/account/delete`
 
 **Authenticated.** Permanently deletes the **caller's own** account (from the validated JWT
-identity, never an id in the body), confirmed with the account password. Removes the account and,
-by cascade, its sessions, refresh tokens, verification/reset challenges, queued mail and the
-**stored vault envelope**. A local vault file on the user's device is not touched.
+identity, never an id in the body), confirmed with the account password and, **when the account has
+TOTP confirmed, a TOTP or recovery code** (the same confirmation that turning TOTP off needs).
+Removes the account and, by cascade, its sessions, refresh tokens, verification/reset challenges,
+queued mail, TOTP rows and the **stored vault envelope**. A local vault file on the user's device is
+not touched.
 
-Request: `{ "password": "<current account password>" }` → **204 No Content**.
+Request: `{ "password": "<current account password>", "code": "123456" }` → **204 No Content**.
+`code` is needed only with TOTP confirmed; accounts without TOTP send `{ "password" }` alone.
 
-- Wrong password, empty password, or an account that cannot be deleted this way → one generic
-  **403** `application/problem+json` (`detail: "Password confirmation failed."`); nothing is
-  deleted and the session stays valid (403, not 401, so a client does not mistake it for a dead
-  session).
+- Wrong password, empty password, a missing or wrong code when TOTP is confirmed, or an account
+  that cannot be deleted this way → one generic **403** `application/problem+json`
+  (`detail: "Password confirmation failed."`); nothing is deleted and the session stays valid
+  (403, not 401, so a client does not mistake it for a dead session). The password is checked
+  first, so a wrong password never uses up a code.
+- TOTP confirmed but the server's Totp capability is off → **503** (no `Retry-After`); nothing is
+  deleted (fail closed).
 - Missing/invalid bearer → **401**. Body over **4 KiB** → **413**. Extra body fields (e.g. an
   `accountId`) are ignored.
 - Argon2 admission overload → **503** (`Retry-After: 1`).
 - Under hardening: per-account limit (5 burst / 1 per 3 min, keyed by the server-issued account
   id) → generic **429**. After deletion the address can register again from scratch.
+
+## `POST /v1/account/password`
+
+**Authenticated.** Changes the caller's own **account** password while signed in. The vault master
+password is **not** affected (the server never has it); clients say so in their UI.
+
+Request: `{ "currentPassword": "…", "newPassword": "<12..128>", "code": "123456" }` → **204 No Content**.
+`code` (TOTP or recovery code) is required only when the account has TOTP confirmed.
+
+- On success, in one transaction: the new Argon2id hash is stored (after an exact re-check, under the
+  account lock, that the hash the current password was verified against is still the stored one),
+  **every other session and its refresh tokens are revoked**, the **calling session stays valid**,
+  and every open password-reset link is invalidated.
+- New password outside 12–128 → **400** ProblemDetails (`detail` names the policy). Checked first,
+  without any Argon2.
+- Wrong current password, missing or wrong code when TOTP is confirmed, or an account that cannot
+  sign in → one generic **403** (`detail: "Password confirmation failed."`); nothing changes and the
+  session stays valid. The password is checked before the code.
+- TOTP confirmed but the Totp capability is off → **503** (no `Retry-After`).
+- Argon2 admission overload → **503** (`Retry-After: 1`). Body over **4 KiB** → **413**. Missing or
+  invalid bearer → **401**.
+- Under hardening: per-account limit (`PasswordChangePerAccount`, 5 burst / 1 per 3 min, keyed by
+  the JWT `sub`) → generic **429**.
 
 ## Two-factor authentication (`/v1/account/totp`)
 
@@ -269,8 +328,9 @@ expects) for the caller's own account. All routes answer **503** when the Totp c
 **401** without a valid session, and **413** over 4 KiB. Under hardening a per-account limit
 (10 burst / 2 per 60 s) applies → **429**.
 
-- `GET /v1/account/totp` → **200** `{ "enabled": false, "confirmedAt": null,
-  "recoveryCodesRemaining": 0, "pendingEnrollment": false }`. No secret is ever included.
+- `GET /v1/account/totp` → **200** `{ "enabled": false, "recoveryCodesRemaining": 0,
+  "pendingEnrollment": false }` (`confirmedAt` is present only once TOTP is confirmed: null fields are
+  omitted). No secret is ever included.
 - `POST /v1/account/totp/enroll` `{ "password": "<account password>" }` → **200**
   `{ "secret": "<Base32>", "otpauthUri": "otpauth://totp/BitosX:<email>?secret=…&issuer=BitosX&algorithm=SHA1&digits=6&period=30",
   "issuer": "BitosX", "label": "<email>", "digits": 6, "periodSeconds": 30 }`. The secret is
@@ -280,7 +340,9 @@ expects) for the caller's own account. All routes answer **503** when the Totp c
 - `POST /v1/account/totp/confirm` `{ "code": "123456" }` → **200**
   `{ "recoveryCodes": ["abcde-fghjk", … ×10] }`. A first valid code for the pending secret turns
   it into the account's second factor and issues **10 single-use recovery codes**, returned
-  exactly once (only keyed verifiers are stored). Wrong code → **400**; nothing pending → **409**.
+  exactly once (only keyed verifiers are stored). Wrong code → **400**; nothing pending → **409**
+  (also when another enroll call replaced the pending secret after this code was checked: the
+  confirmation is bound to the secret the code matched).
 - `POST /v1/account/totp/disable` `{ "password": "…", "code": "<TOTP or recovery code>" }`
   → **204**. Removes the second factor, every recovery code and every open challenge. Wrong
   password or code → **403** generic (the password is checked first, so a wrong password never
@@ -288,9 +350,9 @@ expects) for the caller's own account. All routes answer **503** when the Totp c
 - `POST /v1/account/totp/recovery-codes` `{ "password": "…", "code": "…" }` → **200**
   `{ "recoveryCodes": [ … ] }`: replaces every recovery code. Same failure contract as disable.
 
-Enabling TOTP changes only the **account** sign-in. The vault master password, the vault key and
-the encrypted envelope are unaffected. A password reset (phase 6) keeps TOTP enabled; deleting the
-account removes it.
+Enabling TOTP changes only the **account** sign-in (and the confirmation of password change and
+account deletion). The vault master password, the vault key and the encrypted envelope are
+unaffected. A password reset (phase 6) keeps TOTP enabled; deleting the account removes it.
 
 ## Encrypted-envelope sync (`/v1/sync`)
 
@@ -303,7 +365,9 @@ a numeric `version`), to refuse arbitrary bytes. One envelope per account.
 Every stored envelope has a **revision** (1, 2, 3, …) and a **fingerprint** (SHA-256 over the
 bytes, lowercase hex). Uploads are compare-and-set on the revision, so two devices can never
 overwrite each other unknowingly: the client names the revision it last saw, and the server writes
-only if that is still current.
+only if that is still current. **Revisions never restart:** after a delete the next upload gets the
+previous revision + 1, never 1, so a device that recorded an old revision can never mistake a new
+lineage for the one it saw.
 
 ### `GET /v1/sync/status`
 
@@ -318,28 +382,34 @@ or **404** when nothing is stored.
 ### `PUT /v1/sync/envelope`
 
 Request: `{ "baseRevision": 0, "envelope": "<base64>" }` — `baseRevision` is the revision the
-client last saw, `0` when it has never uploaded.
+client last saw, `0` when nothing is stored (never uploaded, or deleted since). `0` is accepted
+only while nothing is stored.
 
-- **200** `{ "revision", "fingerprint", "sizeBytes", "updatedAt" }` — stored as `baseRevision + 1`.
+- **200** `{ "revision", "fingerprint", "sizeBytes", "updatedAt" }` — stored as the next revision
+  (`baseRevision + 1`, or after a delete the deleted revision + 1).
 - **409** `application/problem+json` with `currentRevision` — the server holds a revision the
-  client has not seen; nothing was written. Download it first, or upload against it deliberately.
+  client has not seen (`currentRevision` is `0` while nothing is stored); nothing was written.
+  Download it first, or upload against it deliberately.
 - **400** — not Base64, empty, or not a BitosX envelope (not UTF-8 JSON, not an object, no
   positive integer `version`, or trailing content).
 - **413** — the decoded envelope exceeds `Security:Sync:MaxEnvelopeBytes` (default and maximum
   16 MiB, the desktop format's own cap); the request body limit for this endpoint is raised
   accordingly (Base64 of that plus 1 KiB).
 - Under public-exposure hardening a per-account write limit applies (30 burst / 10 per minute,
-  keyed by the account id from the JWT) → generic **429**.
+  keyed by the account id from the JWT) → generic **429**. It runs before the body is read, so a
+  limited upload costs no body transfer or parsing.
+- Clients give envelope transfers a longer timeout (120 s) than ordinary calls (15 s).
 
 ### `DELETE /v1/sync/envelope`
 
-Removes the account's stored envelope. → **204**, also when nothing was stored (idempotent). Under
-hardening the same per-account write limit applies.
+Removes the account's stored envelope. → **204**, also when nothing was stored (idempotent). The
+revision is kept as a tombstone (status/download answer **404**), so the next upload continues the
+numbering. Under hardening the same per-account write limit applies.
 
 ## `GET /health`
 
-Liveness check only. It does **not** report database or dependency readiness
-(there is no database in this milestone).
+Process liveness only. It does **not** report database or dependency readiness, so a public probe
+learns nothing about the configuration behind it. Readable cross-origin by the status-page origins.
 
 **200 OK**
 
@@ -367,5 +437,5 @@ configuration, usernames, IPs, or secrets.
 
 ## OpenAPI
 
-An OpenAPI document is served at `/openapi/v1.json` (loopback only in this
-phase; exposure must be reviewed before any public go-live).
+An OpenAPI document is served at `/openapi/v1.json` **in the Development environment only**; in
+Production the route does not exist (404). Exposing it publicly would be a separate decision.
