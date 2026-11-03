@@ -194,6 +194,26 @@ public sealed class EnvelopeStoreTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task TheUploadAnswer_CarriesTheStoredTimestamp_ToTheMicrosecond()
+    {
+        // 100 ns ticks the DATETIME(6) column cannot hold (.1234567 s).
+        _clock.Advance(TimeSpan.FromTicks(1_234_567));
+        var account = await NewAccountAsync();
+        var envelope = Bytes("{\"version\":1}");
+
+        var stored = await _store.UpsertAsync(account, 0, envelope, SHA256.HashData(envelope));
+        var read = await _store.GetAsync(account, includeEnvelope: false);
+
+        Assert.Equal(0, stored.UpdatedAt.Ticks % 10);
+        Assert.Equal(read!.UpdatedAt, stored.UpdatedAt);
+        Assert.Equal(DateTimeKind.Utc, stored.UpdatedAt.Kind);
+
+        var conflict = await _store.UpsertAsync(account, 0, envelope, SHA256.HashData(envelope));
+        Assert.Equal(EnvelopeUpsertOutcome.Conflict, conflict.Outcome);
+        Assert.Equal(0, conflict.UpdatedAt.Ticks % 10);
+    }
+
+    [Fact]
     public async Task ReadTimestamps_AreUtc()
     {
         var account = await NewAccountAsync();

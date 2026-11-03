@@ -43,7 +43,10 @@ tables exist but no SMS behavior is implemented.
   is not in `appsettings*.json`, source, docs, or tests.
 - Development/tests read it from **.NET user-secrets**:
   - API (`UserSecretsId: bitosx-api`): `ConnectionStrings:Bitosx`
-  - Tests (`UserSecretsId: bitosx-infrastructure-tests`): `ConnectionStrings:BitosxTest`
+  - Tests (`UserSecretsId: bitosx-infrastructure-tests`): `ConnectionStrings:BitosxTest` (schema
+    account) and `ConnectionStrings:BitosxTestRuntime` (DML only); the environment variables
+    `ConnectionStrings__BitosxTest` / `ConnectionStrings__BitosxTestRuntime` override them
+    (`tools/devstack/test-db.sh` provisions a throwaway MariaDB and sets both).
 - Production secret injection will be designed separately (not app-embedded).
 
 ## Schema (initial migration `0001_initial_account_schema.sql`)
@@ -129,8 +132,11 @@ values read back are `DateTimeKind.Utc`.
 ## Migration procedure
 
 1. Author the next script as `NNNN_description.sql` under
-   `src/BitosX.Infrastructure/Persistence/Migrations/` (embedded resource). Use SQL that runs on both
-   MariaDB 11.8 (production) and MySQL 8 (the test database).
+   `src/BitosX.Infrastructure/Persistence/Migrations/` (embedded resource). Use SQL that runs on
+   MariaDB 11.8 (production) and 12.3; CI runs the whole test suite on both. MariaDB 10.11 cannot run
+   the migrations (it does not know the MySQL 8 collation `utf8mb4_0900_ai_ci` that the migration
+   runner and the migrations name; 11.8 and 12.3 do) and is not supported. Changing an applied migration is not an option
+   (the runner does not re-run it, so fresh and existing schemas would diverge).
 2. Review the SQL before applying.
 3. Deploy: `dotnet BitosX.Api.dll migrate` (schema-management account,
    `ConnectionStrings:BitosxMigrator`) applies pending scripts in order under an advisory lock and

@@ -61,9 +61,7 @@ public sealed class HardenedAuthApiFactory : WebApplicationFactory<Program>
 
     public HardenedAuthApiFactory()
     {
-        var cfg = new ConfigurationBuilder().AddUserSecrets("bitosx-infrastructure-tests").Build();
-        _testDbConnectionString = cfg.GetConnectionString("BitosxTest")
-            ?? throw new InvalidOperationException("ConnectionStrings:BitosxTest not configured for tests.");
+        _testDbConnectionString = TestDatabase.ConnectionString;
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)

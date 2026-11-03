@@ -1,0 +1,74 @@
+# BitosX API — systemd unit for the production host (see docs/DEPLOYMENT.md, "Production artifacts").
+#
+# Install:  install -m 0644 deploy/systemd/bitosx-api.service /etc/systemd/system/
+#           systemctl daemon-reload && systemctl enable --now bitosx-api
+#
+# The service runs the release that /opt/bitosx-api/current points to (deploy/scripts/deploy.sh switches it) as the
+# dedicated system user bitosx-api, on loopback Kestrel only; Apache is its only peer.
+#
+# Runtime secrets come from /etc/bitosx-api/bitosx-api.env: root-owned, group bitosx-api, mode 0640. It holds ONLY
+# the web host's settings (ConnectionStrings__Bitosx, Security__JwtSigningKey, Security__Jwt__KeyId,
+# Security__EmailVerificationPepper, Security__EmailOutboxKey, Security__TotpKey, Email__SmtpAppPassword, ...). The
+# migrator secret (ConnectionStrings__BitosxMigrator) never goes into this file: deploy.sh reads it from a separate
+# root-only file for the `migrate` step.
+
+[Unit]
+Description=BitosX API (loopback Kestrel behind Apache)
+Documentation=https://github.com/networkluki/bitosx-api/blob/main/docs/DEPLOYMENT.md
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=bitosx-api
+Group=bitosx-api
+WorkingDirectory=/opt/bitosx-api/current
+ExecStart=/usr/bin/dotnet /opt/bitosx-api/current/BitosX.Api.dll
+
+Environment=ASPNETCORE_ENVIRONMENT=Production
+# Loopback only (the same value as appsettings.json; the application refuses a non-loopback listener in Production).
+Environment=Kestrel__Endpoints__Http__Url=http://127.0.0.1:5080
+Environment=DOTNET_NOLOGO=1
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+EnvironmentFile=/etc/bitosx-api/bitosx-api.env
+
+Restart=on-failure
+RestartSec=5s
+# Graceful stop: SIGTERM lets the host finish in-flight requests (ASP.NET Core waits up to 30 s), then SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=45s
+TimeoutStartSec=60s
+SyslogIdentifier=bitosx-api
+
+# ---- sandboxing (what the .NET runtime tolerates) ----
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+UMask=0077
+# Nothing on disk is written by the service: logs go to the journal (stdout), the release directory is read-only to
+# it, and the runtime's diagnostics socket lives in the private /tmp. Hence no ReadWritePaths= at all.
+#
+# Deliberately NOT set:
+#   MemoryDenyWriteExecute=yes  the .NET JIT maps writable+executable memory; the service would crash at startup.
+#   IPAddressAllow=localhost    EmailDelivery talks to smtp.gmail.com:587; restrict egress in the host firewall.
+#   SystemCallFilter=           not verified against the .NET runtime on this host; add only after testing.
+
+[Install]
+WantedBy=multi-user.target

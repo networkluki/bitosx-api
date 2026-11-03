@@ -51,6 +51,37 @@ public sealed class BrowserCorsOptionsTests
     [Fact] public void SubdomainWildcard_Rejected() => AssertRejected("https://*.bitosx.se");
     [Fact] public void Http_Rejected() => AssertRejected("http://vault.bitosx.se");
     [Fact] public void HttpLoopback_Rejected() => AssertRejected("http://localhost:5173");
+
+    // ---- loopback http:// (Development/Testing only: the host passes allowLoopbackHttp) ----
+
+    private static BrowserCorsOptions BindLoopback(Dictionary<string, string?> d)
+        => BrowserCorsOptions.Bind(new ConfigurationBuilder().AddInMemoryCollection(d).Build(), allowLoopbackHttp: true);
+
+    [Theory]
+    [InlineData("http://127.0.0.1:8788")]
+    [InlineData("http://localhost:5173")]
+    [InlineData("http://[::1]:8788")]
+    public void HttpLoopback_AcceptedOnlyWhenAllowed(string origin)
+    {
+        Assert.Throws<InvalidOperationException>(() => Bind(new() { [P + "AllowedOrigins"] = origin }));
+        var o = BindLoopback(new() { [P + "AllowedOrigins"] = origin, [P + "StatusPageOrigins"] = origin });
+        Assert.Equal([origin], o.Origins);
+        Assert.Equal([origin], o.StatusOrigins);
+    }
+
+    [Theory]
+    [InlineData("http://vault.bitosx.se")]   // http:// for a non-loopback host stays refused
+    [InlineData("http://10.0.0.5:8788")]
+    [InlineData("http://127.0.0.1:8788/")]   // the exact-spelling rules still apply
+    [InlineData("http://LOCALHOST:5173")]
+    [InlineData("http://user@127.0.0.1:8788")]
+    [InlineData("http://*:8788")]
+    public void HttpLoopbackAllowance_KeepsEveryOtherRule(string origin)
+        => Assert.Throws<InvalidOperationException>(() => BindLoopback(new() { [P + "AllowedOrigins"] = origin }));
+
+    [Fact]
+    public void HttpLoopbackAllowance_StillAcceptsHttps()
+        => Assert.Equal(["https://vault.bitosx.se"], BindLoopback(new() { [P + "AllowedOrigins"] = "https://vault.bitosx.se" }).Origins);
     [Fact] public void TrailingSlash_Rejected() => AssertRejected("https://vault.bitosx.se/");
     [Fact] public void Path_Rejected() => AssertRejected("https://vault.bitosx.se/verify-email");
     [Fact] public void Query_Rejected() => AssertRejected("https://vault.bitosx.se?x=1");

@@ -16,7 +16,80 @@ Status legend:
 
 ---
 
+## Production artifacts (`deploy/`)
+
+| File | What it is |
+|---|---|
+| [`deploy/systemd/bitosx-api.service`](../deploy/systemd/bitosx-api.service) | The service: user `bitosx-api`, `ASPNETCORE_ENVIRONMENT=Production`, loopback Kestrel, `EnvironmentFile=/etc/bitosx-api/bitosx-api.env`, `Restart=on-failure`, graceful stop, sandboxing (`systemd-analyze security`: exposure 3.0). No `MemoryDenyWriteExecute` (the .NET JIT needs it off). |
+| [`deploy/apache/api.bitosx.se.conf`](../deploy/apache/api.bitosx.se.conf) | The TLS vhost: proxies to `http://127.0.0.1:5080/`, trusts `CF-Connecting-IP` only from the Cloudflare ranges in `/etc/apache2/cloudflare-trusted-proxies.conf`, sends Kestrel exactly one `X-Forwarded-For`/`-Proto`, adds HSTS/nosniff and never `Access-Control-*`, `LimitRequestBody` = the API's envelope body limit with a clean 413 above it, `ProxyTimeout 150` (> the 120 s envelope transfer time). |
+| [`deploy/scripts/deploy.sh`](../deploy/scripts/deploy.sh) | One release, with `--dry-run`: versioned directory under `/opt/bitosx-api/releases/`, database backup, `migrate`, atomic `current` switch, restart, health check, automatic switch back, keeps the last 5 releases. |
+| [`deploy/scripts/verify.sh`](../deploy/scripts/verify.sh) | The verification procedure below as assertions; `--local` adds the host checks. |
+| [`deploy/scripts/update-cloudflare-ips.sh`](../deploy/scripts/update-cloudflare-ips.sh) | Refreshes the Cloudflare trusted-proxy list (validated CIDRs, atomic install, `apachectl -t` before the reload, previous file kept on any failure). |
+
+### One-time host setup
+
+```bash
+# Service account and directories
+useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin bitosx-api
+install -d -o root -g root -m 0755 /opt/bitosx-api /opt/bitosx-api/releases
+install -d -o root -g bitosx-api -m 0750 /etc/bitosx-api
+
+# Runtime secrets of the web host only (KEY=value lines, systemd EnvironmentFile syntax):
+#   ConnectionStrings__Bitosx, Security__JwtSigningKey, Security__Jwt__KeyId, Security__EmailVerificationPepper,
+#   Security__EmailOutboxKey, Security__TotpKey, Security__PublicExposureHardening__Enabled=true,
+#   Email__PublicBaseUrl=https://vault.bitosx.se, Email__FromAddress, Email__SmtpUsername, Email__SmtpAppPassword
+install -o root -g bitosx-api -m 0640 /dev/null /etc/bitosx-api/bitosx-api.env
+# The migrator secret, for deploy.sh only (one line ConnectionStrings__BitosxMigrator=...); never in the file above
+install -o root -g root -m 0600 /dev/null /etc/bitosx-api/migrator.env
+
+install -m 0644 deploy/systemd/bitosx-api.service /etc/systemd/system/ && systemctl daemon-reload
+systemctl enable bitosx-api            # started by the first deploy.sh
+
+a2enmod ssl proxy proxy_http headers remoteip rewrite
+deploy/scripts/update-cloudflare-ips.sh --no-reload    # before the site: the vhost names the list file
+install -m 0644 deploy/apache/api.bitosx.se.conf /etc/apache2/sites-available/
+a2ensite api.bitosx.se && apachectl -t && systemctl reload apache2
+# /etc/apache2/conf-available/security.conf: ServerTokens Prod, ServerSignature Off, TraceEnable Off
+# A weekly root timer or cron entry runs deploy/scripts/update-cloudflare-ips.sh.
+```
+
+### Database accounts
+
+MariaDB **11.8** (production; Debian 13) and **12.3** are tested (CI runs the whole suite on both). **10.11 is not
+supported**: it cannot run the migrations (unknown collation `utf8mb4_0900_ai_ci`). As the MariaDB root (unix socket):
+
+```sql
+CREATE DATABASE bitosx CHARACTER SET utf8mb4;
+-- schema management: used only by `migrate` (deploy.sh)
+CREATE USER 'bitosx_migrator'@'127.0.0.1' IDENTIFIED BY '<openssl rand -hex 24>';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES ON bitosx.* TO 'bitosx_migrator'@'127.0.0.1';
+-- the web host: DML only (DELETE is needed by housekeeping)
+CREATE USER 'bitosx_app'@'127.0.0.1' IDENTIFIED BY '<openssl rand -hex 24>';
+GRANT SELECT, INSERT, UPDATE, DELETE ON bitosx.* TO 'bitosx_app'@'127.0.0.1';
+```
+
+These are exactly the grants the test suite, the local live stack and CI run with (the migrations need nothing
+more). `deploy.sh` backs up with `mariadb-dump` as root over the unix socket (or `BITOSX_DEPLOY_DUMP_DEFAULTS_FILE`).
+
 ## Deploy procedure (every release)
+
+With the artifacts above, one command does every step below and stops at the first failure:
+
+```bash
+dotnet publish src/BitosX.Api -c Release -o out && tar -C out -czf bitosx-api-<version>.tar.gz .
+deploy/scripts/deploy.sh --dry-run bitosx-api-<version>.tar.gz   # checks + plan, changes nothing
+deploy/scripts/deploy.sh bitosx-api-<version>.tar.gz             # as root
+deploy/scripts/verify.sh --local                                 # on the host
+```
+
+`deploy.sh` unpacks the release, backs the database up (`mariadb-dump --single-transaction`, gzip, 0600, checked
+for completeness) into `/var/backups/bitosx-api`, runs `migrate` with the migrator secret in that one process's
+environment, switches `/opt/bitosx-api/current` atomically, restarts the service and waits for `/health`. If the
+new release is not healthy within 60 s it switches back to the previous release and fails. **Migrations are
+forward-only**: a switch back keeps the new schema, which works because every migration so far only adds; if a
+future migration does not, restore the backup the run printed.
+
+The manual steps, for reference:
 
 1. **Apply migrations first** (required — nothing else runs them). With the new build, before the web
    host is restarted:
@@ -39,6 +112,13 @@ Phase 8 adds migrations 0006 (envelope `LONGBLOB`, revision tombstones), 0007 (b
 `normalized_email` and `password_hash`) and 0008 (outbox payload size, per-account recovery-code
 uniqueness, housekeeping indexes). All are online `ALTER TABLE`s on small tables except `vault_blobs`
 (0006 rewrites it; schedule the migration in a quiet minute if many vaults are stored).
+
+## Configuration added in phase 9
+
+| Key | Default | Notes |
+|---|---|---|
+| `Email:HoldInOutbox` | `false` | **Development/Testing only** (startup fails in any other environment, Production included): register/resend/forgot-password queue mail in the encrypted outbox without SMTP and nothing delivers it. Used by the local live stack (`tools/devstack`). Cannot be combined with `Email:SmtpAppPassword`. |
+| `Security:Cors:AllowedOrigins` / `StatusPageOrigins` | unchanged | A loopback `http://` origin is now accepted in Development/Testing only (the local live stack); Production still requires `https://`. |
 
 ## Configuration added in phase 8
 
@@ -86,7 +166,10 @@ uniqueness, housekeeping indexes). All are online `ALTER TABLE`s on small tables
   malformed listener fails startup.
 - **[app] Login capability/config validation** — JWT/refresh/hardening config is validated fail-closed at
   startup (short/non-canonical key, missing kid, orphan previous key, bad lifetimes, invalid limiter values).
-- **[app] Generic error model** — RFC7807 ProblemDetails only; no stack/type/path leakage; correlation id.
+- **[app] Generic error model** — RFC7807 ProblemDetails (a few framework rejections, e.g. malformed JSON → 400,
+  unknown route → 404, carry an empty body); no stack/type/path leakage; correlation id.
+- **[app] Development-only settings refused** — `Email:HoldInOutbox` and loopback `http://` CORS origins /
+  `Email:PublicBaseUrl` fail startup outside Development/Testing (`tools/devstack/smoke.sh` checks this).
 
 ## Repository-verified configuration
 
@@ -109,14 +192,19 @@ These are **not** verifiable from this repository. Each is a blocker until confi
 - **[host] Kestrel loopback-only binding** — ensure `ASPNETCORE_URLS`/systemd env do not override the
   loopback endpoint with a public/wildcard address (the app rejects a wildcard it *can* observe, but a
   binding injected purely by the environment must still be checked on the host).
-- **[host] Firewall** — the Kestrel port (e.g. `5080`) is not exposed on any public interface.
+- **[host] Firewall** — the Kestrel port (e.g. `5080`) is not exposed on any public interface. Port 443 accepts only
+  Cloudflare's ranges (or Cloudflare Authenticated Origin Pulls is enabled; see the commented `SSLVerifyClient`
+  lines in the vhost), so nothing reaches Apache except through Cloudflare. The repository cannot enforce this.
 - **[host] Apache is the sole Kestrel peer** — only the local reverse proxy reaches loopback Kestrel;
   no direct-origin path bypasses Cloudflare/Apache.
 - **[host] Cloudflare → Apache real-IP trust** — Apache derives the real client address only from
   Cloudflare-controlled traffic via the deployment's trusted-Cloudflare-network mechanism, ignores
   client-supplied spoofed origin-IP headers from untrusted peers, and forwards a **normalized**
   `X-Forwarded-For` plus the correct `X-Forwarded-Proto` to loopback Kestrel. (Do not hardcode a
-  Cloudflare CIDR list in application source.)
+  Cloudflare CIDR list in application source.) The repository's vhost does this with `mod_remoteip`
+  (`RemoteIPHeader CF-Connecting-IP`, `RemoteIPTrustedProxyList` kept current by `update-cloudflare-ips.sh`) and
+  replaces `X-Forwarded-For`/`-Proto` with one value each; confirm the installed vhost is that file and the list
+  is refreshed on a schedule.
 - **[host] Host/Origin** — Apache validates/normalizes the Host; `api.bitosx.se` is the authoritative
   production hostname (already in `AllowedHosts`).
 - **[host] TLS / HSTS** — TLS is terminated upstream (Cloudflare/Apache); Kestrel receives loopback HTTP.
@@ -154,6 +242,13 @@ These are **not** verifiable from this repository. Each is a blocker until confi
 ---
 
 ## Verification procedure (run on the production host; values are deployment-specific placeholders)
+
+`deploy/scripts/verify.sh` runs the public-chain checks below as assertions (OpenAPI 404, `/health` 200, CORS
+exactly as documented with a single `Access-Control-Allow-Origin`, HSTS/nosniff, no version in `Server`, 413 for an
+oversized envelope); `verify.sh --local` on the host adds the listener, service, Apache, secret-file and MariaDB
+checks. Before a release, `tools/devstack/smoke.sh` runs the application-side checks against a Production-configured
+API on a developer machine or in CI (startup refusals, loopback listener, CORS, headers, Host filtering, 413,
+`X-Forwarded-For`/`CF-Connecting-IP` handling). The commands below remain the manual equivalent.
 
 ```bash
 # Kestrel listens on loopback only (expect 127.0.0.1:<port> / ::1, never 0.0.0.0/[::]):

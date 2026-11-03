@@ -1,0 +1,132 @@
+# Cross-repository end to end: the live stack of this repository (API + MariaDB), then the web vault's live suite
+# (networkluki/bitosx-manager, real Chromium with real CORS) and the desktop live tests (networkluki/bitosx, through
+# the real BitosX.ApiClient) against it.
+#
+# The two client repositories are private: they are checked out with the repository secret BITOSX_E2E_READ_TOKEN,
+# a fine-grained personal access token with "Contents: read" on networkluki/bitosx-manager and networkluki/bitosx
+# only. Without it the job fails (it never reports a pass for suites it did not run).
+#
+# Actions are pinned to a commit, not to a tag that can be moved.
+name: E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *" # nightly, 03:17 UTC
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  PLAYWRIGHT_VERSION: "1.56.1"
+
+jobs:
+  e2e:
+    name: Web vault + desktop against the live stack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_RANDOM_ROOT_PASSWORD: "1"
+        ports:
+          - 3407:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+    env:
+      BITOSX_DEVSTACK_EXTERNAL_DB: "1"
+      BITOSX_DEVSTACK_DB_PORT: "3407"
+      BITOSX_DEVSTACK_MARIADB_IMAGE: mariadb:11.8
+    steps:
+      - name: Require the read token for the client repositories
+        env:
+          BITOSX_E2E_READ_TOKEN: ${{ secrets.BITOSX_E2E_READ_TOKEN }}
+        run: |
+          if [ -z "$BITOSX_E2E_READ_TOKEN" ]; then
+            echo "::error title=Missing secret BITOSX_E2E_READ_TOKEN::Create the repository secret BITOSX_E2E_READ_TOKEN (Settings > Secrets and variables > Actions): a fine-grained personal access token with Contents: read on networkluki/bitosx-manager and networkluki/bitosx only. Nothing was tested."
+            exit 1
+          fi
+
+      - name: Check out the API
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: bitosx-api
+          persist-credentials: false
+
+      - name: Check out the web vault (networkluki/bitosx-manager)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: networkluki/bitosx-manager
+          path: bitosx-manager
+          token: ${{ secrets.BITOSX_E2E_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Check out the desktop client (networkluki/bitosx)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: networkluki/bitosx
+          path: bitosx
+          token: ${{ secrets.BITOSX_E2E_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/playwright" --no-save --no-audit --no-fund "playwright@${PLAYWRIGHT_VERSION}"
+          "$RUNNER_TEMP/playwright/node_modules/.bin/playwright" install --with-deps chromium
+          echo "NODE_PATH=$RUNNER_TEMP/playwright/node_modules" >> "$GITHUB_ENV"
+
+      - name: Read the generated MariaDB root password
+        env:
+          SERVICE_ID: ${{ job.services.mariadb.id }}
+        run: |
+          password="$(docker logs "$SERVICE_ID" 2>&1 | sed -n 's/.*GENERATED ROOT PASSWORD: //p' | head -n 1)"
+          if [ -z "$password" ]; then echo "::error::the MariaDB service logged no generated root password"; exit 1; fi
+          echo "::add-mask::$password"
+          echo "BITOSX_DEVSTACK_DB_ROOT_PASSWORD=$password" >> "$GITHUB_ENV"
+
+      - name: Bring the live stack up
+        run: |
+          bitosx-api/tools/devstack/up.sh
+          # The three client variables (plain KEY=value lines) for the steps below.
+          cat bitosx-api/tools/devstack/.state/env >> "$GITHUB_ENV"
+
+      - name: Web vault live suite
+        working-directory: bitosx-manager
+        run: node tests/e2e-live.js
+
+      - name: Desktop live tests
+        working-directory: bitosx
+        run: dotnet test tests/BitosX.LiveTests -c Release
+
+      - name: Bring the live stack down
+        if: always()
+        run: bitosx-api/tools/devstack/down.sh
+
+      - name: Keep the API logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-api-logs
+          path: bitosx-api/tools/devstack/.state/logs
+          if-no-files-found: warn
+          retention-days: 14

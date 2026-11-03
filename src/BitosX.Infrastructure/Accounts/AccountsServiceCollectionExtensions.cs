@@ -34,8 +34,24 @@ public static class AccountsServiceCollectionExtensions
 
     // ---- Capability detection (once, at composition) ----
 
-    public static AccountCapabilities DetectCapabilities(IConfiguration configuration)
+    /// <summary>The Development/Testing-only switch that queues mail without delivering it (see <see cref="AccountCapabilities.EmailHeldInOutbox"/>).</summary>
+    public const string HoldInOutboxKey = "Email:HoldInOutbox";
+
+    /// <summary>
+    /// Detects the capabilities from configuration (fail closed on inconsistent secrets).
+    /// <paramref name="allowDevelopmentOnlySettings"/> is true only in the Development and Testing environments;
+    /// without it a Development-only setting (<see cref="HoldInOutboxKey"/>) fails startup instead of being ignored.
+    /// </summary>
+    public static AccountCapabilities DetectCapabilities(IConfiguration configuration, bool allowDevelopmentOnlySettings = false)
     {
+        // A Development-only switch is refused outright elsewhere (also without a database), never silently ignored.
+        var holdRequested = configuration.GetValue(HoldInOutboxKey, false);
+        if (holdRequested && !allowDevelopmentOnlySettings)
+        {
+            throw new InvalidOperationException(
+                $"{HoldInOutboxKey} is a Development/Testing-only setting (mail would never be delivered); it is refused in this environment.");
+        }
+
         var accountCore = !string.IsNullOrWhiteSpace(configuration.GetConnectionString("Bitosx"));
         if (!accountCore)
         {
@@ -81,6 +97,18 @@ public static class AccountsServiceCollectionExtensions
             delivery = true;
         }
 
+        // HoldInOutbox: queue without delivering. Contradicts real delivery and needs the verification secrets.
+        if (holdRequested && delivery)
+        {
+            throw new InvalidOperationException($"{HoldInOutboxKey} cannot be combined with EmailDelivery (Email:SmtpAppPassword).");
+        }
+
+        if (holdRequested && !verification)
+        {
+            throw new InvalidOperationException(
+                $"{HoldInOutboxKey} requires EmailVerification (Security:EmailVerificationPepper + Security:EmailOutboxKey).");
+        }
+
         // Login: an independent AccountCore-backed capability, gated ONLY on the current JWT signing
         // key (Security:JwtSigningKey). No refresh-token secret is involved. Non-secret JWT metadata
         // alone never enables Login. A previous signing secret without a current one is malformed.
@@ -124,6 +152,7 @@ public static class AccountsServiceCollectionExtensions
             AccountCoreEnabled = true,
             EmailVerificationEnabled = verification,
             EmailDeliveryEnabled = delivery,
+            EmailHeldInOutbox = holdRequested,
             LoginEnabled = login,
             TotpEnabled = totp,
         };

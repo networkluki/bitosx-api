@@ -22,6 +22,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Every test class shares the one test database and resets it: collections must run one at a time. -->
+    <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\BitosX.Api\BitosX.Api.csproj" />
   </ItemGroup>
 

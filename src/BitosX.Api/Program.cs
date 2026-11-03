@@ -82,7 +82,10 @@ builder.WebHost.ConfigureKestrel(options =>
 // Bound + validated fail-closed at startup (exact https origins only, no credentials). With both
 // Security:Cors:AllowedOrigins and Security:Cors:StatusPageOrigins empty, no CORS middleware is registered
 // and no CORS header is emitted. See BrowserCorsOptions for the policies and their rationale.
-var corsOptions = BrowserCorsOptions.Bind(builder.Configuration);
+// Development/Testing-only allowances (the local live stack, tools/devstack): a loopback http:// CORS origin and
+// Email:PublicBaseUrl, and Email:HoldInOutbox. Every other environment, Production included, refuses them.
+var developmentOrTesting = builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing");
+var corsOptions = BrowserCorsOptions.Bind(builder.Configuration, developmentOrTesting);
 builder.Services.AddSingleton(corsOptions);
 if (corsOptions.AnyEnabled)
 {
@@ -110,7 +113,7 @@ builder.Services.AddSingleton<IProductVersionProvider>(
 // EmailVerification adds register/verify/resend + outbox; EmailDelivery adds the SMTP
 // sender + dispatcher. A missing optional capability disables only itself.
 var bitosxConnectionString = builder.Configuration.GetConnectionString("Bitosx");
-var capabilities = AccountsServiceCollectionExtensions.DetectCapabilities(builder.Configuration);
+var capabilities = AccountsServiceCollectionExtensions.DetectCapabilities(builder.Configuration, developmentOrTesting);
 builder.Services.AddSingleton(capabilities);
 
 // Fail closed in Production on an unsafe public-exposure posture: Login without hardening, or a
@@ -135,13 +138,12 @@ if (capabilities.AccountCoreEnabled)
     if (capabilities.EmailVerificationEnabled)
     {
         // Email:PublicBaseUrl must be https (fail closed); a loopback http URL is accepted only in Development/Testing.
-        var allowLoopbackHttpBaseUrl = builder.Environment.IsDevelopment() || builder.Environment.IsEnvironment("Testing");
-        builder.Services.AddBitosxEmailVerification(builder.Configuration, bitosxConnectionString!, allowLoopbackHttpBaseUrl);
+        builder.Services.AddBitosxEmailVerification(builder.Configuration, bitosxConnectionString!, developmentOrTesting);
     }
 
     // EmailDelivery (SMTP sender + background dispatcher) is registered ONLY when SMTP
     // credentials are present. When absent, no dispatcher runs and no queued mail is
-    // attempted.
+    // attempted (with Email:HoldInOutbox, Development/Testing only, mail is still queued and simply stays there).
     if (capabilities.EmailDeliveryEnabled)
     {
         builder.Services.AddBitosxEmailDelivery(builder.Configuration);
@@ -245,8 +247,12 @@ if (capabilities.LoginEnabled)
 // Capability state is logged safely at startup (booleans only, no secrets) and is
 // deliberately NOT exposed on the public /health endpoint.
 app.Logger.LogInformation(
-    "BitosX account capabilities: AccountCore={AccountCore} EmailVerification={EmailVerification} EmailDelivery={EmailDelivery} Login={Login} Totp={Totp}",
-    capabilities.AccountCoreEnabled, capabilities.EmailVerificationEnabled, capabilities.EmailDeliveryEnabled, capabilities.LoginEnabled, capabilities.TotpEnabled);
+    "BitosX account capabilities: AccountCore={AccountCore} EmailVerification={EmailVerification} EmailDelivery={EmailDelivery} EmailHeldInOutbox={EmailHeldInOutbox} Login={Login} Totp={Totp}",
+    capabilities.AccountCoreEnabled, capabilities.EmailVerificationEnabled, capabilities.EmailDeliveryEnabled, capabilities.EmailHeldInOutbox, capabilities.LoginEnabled, capabilities.TotpEnabled);
+if (capabilities.EmailHeldInOutbox)
+{
+    app.Logger.LogWarning("Email:HoldInOutbox is set: verification and reset mail is queued but never delivered (Development/Testing only).");
+}
 
 // Extensibility seam for endpoint contributions registered in DI. No modules
 // are registered in production; integration tests use this to exercise the
