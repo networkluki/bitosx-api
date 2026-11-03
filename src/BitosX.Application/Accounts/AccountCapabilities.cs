@@ -12,6 +12,8 @@ namespace BitosX.Application.Accounts;
 ///   does NOT require SMTP delivery.
 /// - <see cref="EmailDeliveryEnabled"/>: physical delivery of queued mail (requires SMTP
 ///   credentials). Optional; its absence must not disable AccountCore or verification.
+/// - <see cref="EmailHeldInOutbox"/>: Development/Testing only — mail is queued but never delivered
+///   (the local live stack reads it from the outbox). Never available in Production.
 /// - <see cref="LoginEnabled"/>: login / session / access-JWT / refresh. An INDEPENDENT capability
 ///   layered on AccountCore — it requires <see cref="AccountCoreEnabled"/> plus valid JWT/login
 ///   configuration (current signing key + mandatory kid, etc.), but does NOT require
@@ -31,6 +33,17 @@ public sealed class AccountCapabilities
     /// unavailable (503); an account that already has TOTP confirmed cannot sign in at all (fail closed, never a bypass).
     /// </summary>
     public bool TotpEnabled { get; init; }
+
+    /// <summary>
+    /// <c>Email:HoldInOutbox</c> (Development/Testing only, refused in any other environment): verification and
+    /// reset mail is queued in the outbox exactly as with delivery, but no SMTP sender or dispatcher exists, so it
+    /// stays there (encrypted) for the local live stack's outbox reader. Mutually exclusive with
+    /// <see cref="EmailDeliveryEnabled"/>; requires <see cref="EmailVerificationEnabled"/>.
+    /// </summary>
+    public bool EmailHeldInOutbox { get; init; }
+
+    /// <summary>Register, resend and forgot-password may queue mail: it is delivered, or (Development/Testing) held.</summary>
+    public bool EmailQueueingEnabled => EmailDeliveryEnabled || EmailHeldInOutbox;
 
     public static AccountCapabilities None { get; } = new()
     {

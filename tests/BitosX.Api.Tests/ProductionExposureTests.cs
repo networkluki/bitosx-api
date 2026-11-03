@@ -144,6 +144,26 @@ public sealed class ProductionExposureTests
         Assert.Equal(HttpStatusCode.OK, (await f.CreateClient().GetAsync("/health")).StatusCode);
     }
 
+    // ---- Email:HoldInOutbox is a Development/Testing-only switch ----
+
+    [Theory]
+    [InlineData("Production", true)]
+    [InlineData("Production", false)]
+    [InlineData("Staging", true)]
+    public void HoldInOutbox_OutsideDevelopmentAndTesting_FailsStartup(string environment, bool withVerification)
+    {
+        using var f = Factory(environment, s =>
+        {
+            if (withVerification)
+            {
+                EnableVerification(s);
+                s["Security:PublicExposureHardening:Enabled"] = "true";
+            }
+            s["Email:HoldInOutbox"] = "true";
+        });
+        Assert.Contains("Email:HoldInOutbox", StartupError(f), StringComparison.Ordinal);
+    }
+
     // ---- CORS: a loopback http:// origin is a Development/Testing convenience only ----
 
     [Theory]

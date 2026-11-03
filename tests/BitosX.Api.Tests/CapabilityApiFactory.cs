@@ -14,11 +14,13 @@ namespace BitosX.Api.Tests;
 public sealed class CapabilityApiFactory : WebApplicationFactory<Program>
 {
     private readonly bool _verification;
+    private readonly bool _holdInOutbox;
     private readonly string _testDbConnectionString;
 
-    public CapabilityApiFactory(bool verification)
+    public CapabilityApiFactory(bool verification, bool holdInOutbox = false)
     {
         _verification = verification;
+        _holdInOutbox = holdInOutbox;
         _testDbConnectionString = TestDatabase.ConnectionString;
     }
 
@@ -37,6 +39,10 @@ public sealed class CapabilityApiFactory : WebApplicationFactory<Program>
             builder.UseSetting("Security:EmailOutboxKey", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
         }
         // Deliberately NO Email:SmtpUsername / Email:SmtpAppPassword → EmailDelivery disabled.
+        if (_holdInOutbox)
+        {
+            builder.UseSetting("Email:HoldInOutbox", "true"); // Testing only: queue mail without delivering it
+        }
         builder.UseSetting("Housekeeping:Enabled", "false"); // no background pruning against the shared test DB
     }
 

@@ -80,6 +80,64 @@ public sealed class CapabilityGatingTests
     private static IConfiguration Raw(Dictionary<string, string?> d)
         => new ConfigurationBuilder().AddInMemoryCollection(d).Build();
 
+    // ---- Email:HoldInOutbox (Development/Testing only) ----
+
+    private static IConfiguration WithHold(IConfiguration baseline)
+        => new ConfigurationBuilder().AddConfiguration(baseline)
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Email:HoldInOutbox"] = "true" }).Build();
+
+    [Fact]
+    public void Detect_Default_NothingHeld_QueueingFollowsDelivery()
+    {
+        var withSmtp = AccountsServiceCollectionExtensions.DetectCapabilities(Config(), allowDevelopmentOnlySettings: true);
+        Assert.False(withSmtp.EmailHeldInOutbox);
+        Assert.True(withSmtp.EmailQueueingEnabled);
+
+        var noSmtp = AccountsServiceCollectionExtensions.DetectCapabilities(Config(delivery: false), allowDevelopmentOnlySettings: true);
+        Assert.False(noSmtp.EmailHeldInOutbox);
+        Assert.False(noSmtp.EmailQueueingEnabled);
+    }
+
+    [Fact]
+    public void Detect_HoldInOutbox_WhenAllowed_QueuesWithoutDelivery()
+    {
+        var c = AccountsServiceCollectionExtensions.DetectCapabilities(WithHold(Config(delivery: false)), allowDevelopmentOnlySettings: true);
+        Assert.True(c.EmailVerificationEnabled);
+        Assert.False(c.EmailDeliveryEnabled);
+        Assert.True(c.EmailHeldInOutbox);
+        Assert.True(c.EmailQueueingEnabled);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Detect_HoldInOutbox_WhenNotAllowed_FailsClosed_EvenWithoutADatabase(bool conn)
+    {
+        var cfg = WithHold(Config(conn: conn, delivery: false));
+        var ex = Assert.Throws<InvalidOperationException>(() => AccountsServiceCollectionExtensions.DetectCapabilities(cfg));
+        Assert.Contains("Email:HoldInOutbox", ex.Message, StringComparison.Ordinal);
+        // The default (no allowance argument) is the Production behaviour.
+        Assert.Throws<InvalidOperationException>(() => AccountsServiceCollectionExtensions.DetectCapabilities(cfg, allowDevelopmentOnlySettings: false));
+    }
+
+    [Fact]
+    public void Detect_HoldInOutbox_WithDelivery_FailsClosed()
+        => Assert.Throws<InvalidOperationException>(
+            () => AccountsServiceCollectionExtensions.DetectCapabilities(WithHold(Config()), allowDevelopmentOnlySettings: true));
+
+    [Fact]
+    public void Detect_HoldInOutbox_WithoutVerification_FailsClosed()
+        => Assert.Throws<InvalidOperationException>(
+            () => AccountsServiceCollectionExtensions.DetectCapabilities(WithHold(Config(verification: false, delivery: false)), allowDevelopmentOnlySettings: true));
+
+    [Fact]
+    public void Detect_HoldInOutboxFalse_IsTheDefault_AndAcceptedEverywhere()
+    {
+        var cfg = new ConfigurationBuilder().AddConfiguration(Config(delivery: false))
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Email:HoldInOutbox"] = "false" }).Build();
+        Assert.False(AccountsServiceCollectionExtensions.DetectCapabilities(cfg).EmailHeldInOutbox);
+    }
+
     [Fact]
     public void Detect_PartialVerification_PepperOnly_FailsClosed()
     {

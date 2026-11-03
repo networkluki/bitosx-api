@@ -109,7 +109,8 @@ public static class AuthEndpoints
         {
             // Email delivery unavailable: generic 503, and DO NOT enqueue undeliverable mail
             // (the registration service is not invoked, so no account/challenge/outbox is created).
-            if (!capabilities.EmailDeliveryEnabled)
+            // Development/Testing may instead hold mail in the outbox (Email:HoldInOutbox).
+            if (!capabilities.EmailQueueingEnabled)
             {
                 return EmailDeliveryUnavailable();
             }
@@ -148,7 +149,7 @@ public static class AuthEndpoints
 
         group.MapPost("/resend-verification", async (ResendVerificationRequest request, AccountCapabilities capabilities, IEmailVerificationService service, CancellationToken ct) =>
         {
-            if (!capabilities.EmailDeliveryEnabled)
+            if (!capabilities.EmailQueueingEnabled)
             {
                 return EmailDeliveryUnavailable();
             }
@@ -162,7 +163,7 @@ public static class AuthEndpoints
         // generic 503 and nothing is created, like register/resend.
         group.MapPost("/forgot-password", async (ForgotPasswordRequest request, AccountCapabilities capabilities, IPasswordResetService service, CancellationToken ct) =>
         {
-            if (!capabilities.EmailDeliveryEnabled)
+            if (!capabilities.EmailQueueingEnabled)
             {
                 return EmailDeliveryUnavailable();
             }
