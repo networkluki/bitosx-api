@@ -1,0 +1,2 @@
+# Runtime state of the local live stack: secrets, logs, build output. Never committed.
+.state/
