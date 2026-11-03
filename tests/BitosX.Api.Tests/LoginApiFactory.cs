@@ -24,10 +24,16 @@ public sealed class LoginApiFactory : WebApplicationFactory<Program>
 {
     internal CapturingEmailSender Emails { get; } = new();
 
+    /// <summary>Passkey security events (the reason behind each generic refusal).</summary>
+    internal RecordingPasskeyLog PasskeyLog { get; } = new();
+
     private readonly string _testDbConnectionString;
 
     /// <summary>When false the Totp capability is off (no Security:TotpKey): used to prove fail-closed behavior.</summary>
     public bool TotpCapability { get; init; } = true;
+
+    /// <summary>When false the Security:WebAuthn section is blanked (Passkeys capability off: every passkey route is 404).</summary>
+    public bool PasskeysCapability { get; init; } = true;
 
     /// <summary>Overrides the Kestrel endpoint from appsettings.json (for tests that run on a real Kestrel listener).</summary>
     public string? KestrelListenerUrl { get; init; }
@@ -54,6 +60,15 @@ public sealed class LoginApiFactory : WebApplicationFactory<Program>
             builder.UseSetting("Security:TotpKey", Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
         }
 
+        // Passkeys: the shipped Security:WebAuthn section (RP ID vault.bitosx.se, origin https://vault.bitosx.se) applies
+        // unless blanked here.
+        if (!PasskeysCapability)
+        {
+            builder.UseSetting("Security:WebAuthn:RelyingPartyId", "");
+            builder.UseSetting("Security:WebAuthn:RelyingPartyName", "");
+            builder.UseSetting("Security:WebAuthn:Origins:0", "");
+        }
+
         builder.UseSetting("Security:Argon2:MemoryKiB", "8192");
         builder.UseSetting("Security:Argon2:Iterations", "1");
         builder.UseSetting("Security:Argon2:MaxConcurrency", "2");
@@ -73,17 +88,20 @@ public sealed class LoginApiFactory : WebApplicationFactory<Program>
             services.RemoveAll<IHostedService>();
             services.RemoveAll<IEmailSender>();
             services.AddSingleton<IEmailSender>(Emails);
+            services.RemoveAll<BitosX.Application.Passkeys.IPasskeySecurityLog>();
+            services.AddSingleton<BitosX.Application.Passkeys.IPasskeySecurityLog>(PasskeyLog);
         });
     }
 
     public async Task ResetDatabaseAsync()
     {
         Emails.Sent.Clear();
+        PasskeyLog.Clear();
         await using var c = new MySqlConnection(_testDbConnectionString);
         await c.OpenAsync();
         await using var cmd = c.CreateCommand();
         // Children first (FKs): refresh_tokens -> sessions -> accounts; outbox references accounts.
-        cmd.CommandText = "DELETE FROM refresh_tokens; DELETE FROM sessions; DELETE FROM email_outbox; DELETE FROM vault_blobs; DELETE FROM accounts;";
+        cmd.CommandText = "DELETE FROM webauthn_challenges; DELETE FROM refresh_tokens; DELETE FROM sessions; DELETE FROM email_outbox; DELETE FROM vault_blobs; DELETE FROM accounts;";
         await cmd.ExecuteNonQueryAsync();
     }
 

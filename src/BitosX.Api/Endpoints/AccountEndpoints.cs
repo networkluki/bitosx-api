@@ -59,6 +59,9 @@ public static class AccountEndpoints
     private static IResult TotpNotEnabled() => Results.Problem(
         statusCode: StatusCodes.Status409Conflict, title: "Conflict", detail: "Two-factor authentication is not enabled.");
 
+    private static IResult PasskeysExist() => Results.Problem(
+        statusCode: StatusCodes.Status409Conflict, title: "Conflict", detail: "The account has passkeys. Remove the passkeys first.");
+
     private static IResult InvalidCode() => Results.Problem(
         statusCode: StatusCodes.Status400BadRequest, title: "Invalid request", detail: "The code is not valid. Check the time on your device and try the next code.");
 
@@ -271,6 +274,8 @@ public static class AccountEndpoints
             {
                 TotpManageOutcome.Succeeded => Results.NoContent(),
                 TotpManageOutcome.NotEnabled => TotpNotEnabled(),
+                // Passkeys exist only on top of TOTP: removing it would leave them as the only factor.
+                TotpManageOutcome.PasskeysExist => PasskeysExist(),
                 _ => PasswordConfirmationFailed(),
             };
         })

@@ -440,6 +440,66 @@ the first server feature that touches the vault at all, so the boundary is state
   weaken the vault: the master password and the envelope are untouched (zero-knowledge boundary).
   Account deletion cascades the TOTP rows; a password reset keeps TOTP enabled.
 
+## Passkeys: WebAuthn (phase 10)
+
+- **Capability `Passkeys`** = Totp + a valid `Security:WebAuthn` (RP ID, RP name, origins; nothing secret).
+  Validated at startup whenever any key of the section is set, also without a database, fail closed: the
+  RP ID is a lower-case DNS name with at least two labels (never an IP address), equal to or a
+  dot-boundary suffix of every origin's host; origins are exact `scheme://host[:port]` values and must be
+  `https://`. Only Development/Testing accept RP ID `localhost` with `http://localhost:<port>` (the local
+  live stack); Production, Staging and every other environment refuse it. A half-filled section fails;
+  an all-blank one means passkeys off (routes 404, `methods` without `passkey`). The public suffix list
+  is not consulted: the operator names their own domain.
+- **On top of TOTP, never instead.** Registering a passkey needs TOTP confirmed and is confirmed with the
+  password (Argon2, admission gate) **and** a TOTP/recovery code, as is removing one. The insert re-checks
+  "TOTP confirmed" and "fewer than 10 passkeys" in one transaction that locks the account row and then the
+  `account_totp` row; TOTP disable takes the same `account_totp` lock and counts the passkeys with a
+  locking read, so a concurrent registration and disable can never leave a passkey without TOTP (tested
+  with races). TOTP disable answers 409 while passkeys exist (before any code is used). Passwordless
+  sign-in also refuses an account whose TOTP row is gone.
+- **Verification** is the Fido2 4.3.2 library (`Fido2.MakeNewCredentialAsync` / `MakeAssertionAsync`)
+  against options rebuilt on the server from the stored challenge and the configuration — never from the
+  client: `clientDataJSON.type`, challenge, origin (exact, against the configured set; cross-origin
+  iframes refused), `rpIdHash` = SHA-256(RP ID), UP flag, UV flag where required, BE/BS consistency,
+  the algorithm being one offered (ES256, EdDSA, RS256), the attested credential id equal to `rawId`, and
+  the signature with the stored COSE key. **No attestation trust**: conveyance `none`, no metadata service;
+  a statement an authenticator still sends is only checked for consistency. Malformed input of any kind is
+  a verification failure, never a 500; the reason (the library's error code or a fixed code) goes to the
+  security log only.
+- **Ceremonies.** Server-side `webauthn_challenges` rows: a 32-byte random challenge, single use (claimed
+  by a conditional UPDATE **before** the response is verified, so a ceremony is spent whatever the
+  outcome), 5 minutes, and bound to their purpose — `register` (the account and an opaque registration id),
+  `mfa` (the MFA challenge, hence its account; one live ceremony per MFA challenge, replaced by each
+  options request) or `passwordless` (an opaque assertion id). The ids the client holds are 256-bit random
+  tokens stored as SHA-256 only (the refresh-token scheme). The challenge itself is stored as is because
+  the library verifies against the original bytes; it is not a secret (the client receives it in the
+  options). Housekeeping deletes expired rows at once.
+- **Second factor.** Identical to the TOTP step: the MFA token names the account, the per-account limiter
+  is asked, one of the 5 attempts is reserved atomically before anything is verified (a refused passkey
+  costs an attempt like a wrong code), the PHC fingerprint and TOTP are re-checked, the credential must be
+  one of that account's (`allowCredentials` = the account's passkeys), and only after verification are the
+  MFA challenge consumed and the use recorded; then the same `CreateOnLoginAsync`. UV is preferred, not
+  required (the password was the first factor).
+- **Passwordless** (a passkey counts as both factors): UV **required** (options and verified flag),
+  `allowCredentials` empty, the returned `userHandle` must equal the stored credential's and the account's
+  current handle (constant-time), the account must be verified, enabled and still have TOTP. The user
+  handle is 32 random bytes per account (`accounts.webauthn_user_handle`, unique), never the account id or
+  the email, so an authenticator or a relying party observer learns nothing about the account from it.
+  The options answer is identical for everyone (no account enumeration); `PasskeyPerAddress` bounds it.
+- **Signature counter.** Updated by compare-and-set on the value that was verified against, so two
+  assertions verified against one counter cannot both succeed. A counter that is not greater than the
+  stored one (when either is non-zero) is refused and logged as a possible clone; authenticators that
+  never count (always 0) keep working. Backup state (`backed_up`) is refreshed on every use.
+- **Logging.** Registered / renamed / deleted / used / refused, with account and passkey row ids and fixed
+  reason codes only — never a credential id, key, challenge, user handle, email or client-sent text.
+- **Responses.** Sign-in failures are one generic 401; confirmation failures one generic 403; the jitter of
+  the other sign-in steps applies. No response carries a public key or (outside the WebAuthn options
+  themselves) a credential id.
+- **Scope.** A passkey authenticates the account only. The vault master password, vault key and envelope
+  are untouched (zero-knowledge). A password reset by email keeps the passkeys (they are a factor the
+  reset link cannot replace, like TOTP); "sign out everywhere" ends sessions and leaves passkeys alone;
+  account deletion removes them (cascade).
+
 ## Rate limiting (Phase 2D public-exposure hardening)
 
 Configured under `Security:PublicExposureHardening` (a single validated model, fail-closed at
@@ -524,6 +584,10 @@ process-wide budget → credential/Argon2 admission → jitter → 200/401.
 The Cloudflare→Apache→loopback-Kestrel trust boundary and its host-side enforcement (Kestrel loopback
 binding, firewall, Apache real-IP config, secrets injection) are documented, with an app-enforced vs
 deployment-enforced checklist and verification commands, in [`DEPLOYMENT.md`](DEPLOYMENT.md).
+
+**Implemented (phase 10):** `POST /v1/auth/passkey/options` and `POST /v1/auth/passkey` per trusted client IP
+(`PasskeyPerAddress`, 20 burst / 10 per 60 s, one shared bucket); `/v1/auth/login/passkey*` under the second
+step's per-IP limit and `MfaPerAccount`; `/v1/account/passkeys/*` writes under `TotpManagePerAccount`.
 
 **Implemented (phase 7, 8):** `POST /v1/auth/login/totp` per-IP and per-account, `/v1/account/totp/*`
 per-account — see "Second factor: TOTP". `POST /v1/account/password` per-account — see "Password reset

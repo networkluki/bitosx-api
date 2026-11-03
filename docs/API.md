@@ -38,7 +38,10 @@ cap (also **413**). Only `PUT /v1/sync/envelope` accepts more.
 > **password-confirmed account deletion** (`POST /v1/account/delete`) exist since phase 6. **TOTP
 > two-factor sign-in** (`POST /v1/auth/login/totp`, `/v1/account/totp/*`) exists since phase 7 and is
 > exposed when the **Totp** capability is enabled (`Security:TotpKey`). **Password change while signed
-> in** (`POST /v1/account/password`) exists since phase 8. **Phone/SMS does not exist yet.** Registration/verification/password reset are exposed when
+> in** (`POST /v1/account/password`) exists since phase 8. **Passkeys (WebAuthn)** — as the second
+> factor and for sign-in without email and password (`/v1/auth/login/passkey*`, `/v1/auth/passkey*`,
+> `/v1/account/passkeys*`) — exist since phase 10 and are exposed when the **Passkeys** capability is
+> enabled (Totp + a valid `Security:WebAuthn`; otherwise those routes are **404**). **Phone/SMS does not exist yet.** Registration/verification/password reset are exposed when
 > EmailVerification is configured; **login/refresh/logout and the account
 > endpoints are exposed independently when the Login capability is enabled** (DB
 > connection + JWT signing key + kid), even without SMTP. The API otherwise stays
@@ -167,10 +170,13 @@ Request: `{ "email": "user@example.com", "password": "<12..128>" }` → **200 OK
   email, session id, password, or token verifier.
 - **Second factor (phase 7).** When the account has TOTP confirmed, a correct password
   does **not** return tokens: the response is **202 Accepted**
-  `{ "mfaToken": "<base64url, 43 chars>", "mfaTokenExpiresAt": "…", "method": "totp" }` and no
-  session exists until `POST /v1/auth/login/totp` succeeds. The token is a one-step bearer
-  secret (5-minute lifetime, 5 wrong codes, single use). If TOTP is required but the server's
-  Totp capability is off, login returns **503** rather than a password-only session (fail closed).
+  `{ "mfaToken": "<base64url, 43 chars>", "mfaTokenExpiresAt": "…", "method": "totp", "methods": ["totp", "recovery"] }`
+  and no session exists until `POST /v1/auth/login/totp` (or, phase 10, `POST /v1/auth/login/passkey`)
+  succeeds. `methods` lists how the step can be completed: `"totp"`, `"recovery"` and — when the server
+  offers passkeys and the account has at least one — `"passkey"`; clients ignore values they do not know
+  (`method` stays `"totp"` for older clients). The token is a one-step bearer secret (5-minute lifetime,
+  5 failed attempts — wrong codes and refused passkeys alike —, single use). If TOTP is required but the
+  server's Totp capability is off, login returns **503** rather than a password-only session (fail closed).
 - When public-exposure hardening is enabled: per-IP, per-normalized-email, and a
   process-wide login budget apply → generic **429** (`Retry-After` when available);
   an unresolvable trusted client IP → **503**. Bounded Argon2 work admission is
@@ -351,13 +357,95 @@ expects) for the caller's own account. All routes answer **503** when the Totp c
 - `POST /v1/account/totp/disable` `{ "password": "…", "code": "<TOTP or recovery code>" }`
   → **204**. Removes the second factor, every recovery code and every open challenge. Wrong
   password or code → **403** generic (the password is checked first, so a wrong password never
-  consumes a code); not enabled → **409**.
+  consumes a code); not enabled → **409**; the account has passkeys → **409**
+  (`detail: "The account has passkeys. Remove the passkeys first."`, checked before the password and
+  code, so nothing is used up). Passkeys exist only on top of TOTP; this holds even when the server's
+  Passkeys capability is off (the passkeys then have to be re-enabled to be removed, or the account deleted).
 - `POST /v1/account/totp/recovery-codes` `{ "password": "…", "code": "…" }` → **200**
   `{ "recoveryCodes": [ … ] }`: replaces every recovery code. Same failure contract as disable.
 
 Enabling TOTP changes only the **account** sign-in (and the confirmation of password change and
 account deletion). The vault master password, the vault key and the encrypted envelope are
 unaffected. A password reset (phase 6) keeps TOTP enabled; deleting the account removes it.
+
+## Passkeys (WebAuthn, phase 10)
+
+Passkeys are added **on top of TOTP, never instead of it**: an account must have TOTP confirmed to
+register one, TOTP cannot be disabled while passkeys exist, and the desktop app keeps signing in with
+TOTP/recovery codes. A passkey authenticates the **account** only; the vault master password is
+untouched (zero-knowledge). Every route below exists only with the **Passkeys** capability (Login + Totp
++ a valid `Security:WebAuthn`, see DEPLOYMENT); without it they are **404**.
+
+`options` objects are the standard WebAuthn JSON (`PublicKeyCredentialCreationOptionsJSON` /
+`PublicKeyCredentialRequestOptionsJSON`: binary members are unpadded base64url strings) as the server's
+WebAuthn library (Fido2 4.3.2) writes them — pass them to `PublicKeyCredential.parseCreationOptionsFromJSON` /
+`parseRequestOptionsFromJSON` (or convert the base64url members) and send `credential.toJSON()` back as
+`credential`. Unknown members are ignored. A ceremony (registration, second step, passwordless) is
+server-side, **single use** whatever its outcome, valid for **5 minutes** (`timeout` 300000 ms), and bound
+to its purpose: a challenge issued for one ceremony is refused by every other.
+
+### Account (`/v1/account/passkeys`, authenticated)
+
+- `GET /v1/account/passkeys` → **200**
+  `{ "passkeys": [ { "id": "<guid>", "name": "…", "createdAt": "…Z", "lastUsedAt": "…Z", "backedUp": true } ], "max": 10 }`
+  (oldest first; `lastUsedAt` is absent until the first sign-in with it; `backedUp` is the authenticator's
+  backup-state flag, i.e. a synced passkey). Never key material or credential ids.
+- `POST /v1/account/passkeys/registration/options` `{ "password": "…", "code": "<TOTP or recovery code>" }`
+  → **200** `{ "registrationId": "<base64url, 43 chars>", "options": { … } }`. The options require a
+  discoverable credential (`residentKey: "required"`) and user verification, `attestation: "none"`, offer
+  ES256 (-7), EdDSA (-8) and RS256 (-257), exclude the account's passkeys (`excludeCredentials`), and carry
+  `user.id` = the account's random 32-byte WebAuthn user handle (never the account id or email) and
+  `user.name` = `user.displayName` = the account email; `rp.id` is the configured RP ID.
+  TOTP not confirmed → **409** (`"Two-factor authentication is required before a passkey can be added."`);
+  10 passkeys already → **409**; both checked before the password and code, so nothing is used up. Wrong
+  password or code → **403** generic (password first; the code is used up only on success). Argon2
+  overload → **503** (`Retry-After: 1`).
+- `POST /v1/account/passkeys/registration` `{ "registrationId": "…", "name": "Laptop", "credential": { … } }`
+  → **201** `{ "id": "<guid>", "name": "Laptop", "createdAt": "…Z", "backedUp": false }`.
+  The name is trimmed, 1-64 characters, without control characters, line separators or bidirectional
+  overrides; an invalid name → **400** before the ceremony is used (retry with the same `registrationId`).
+  Unknown, expired, already used or another account's `registrationId` → **410**. Any verification failure
+  (origin, RP ID hash, type, challenge, user presence/verification flags, algorithm, malformed data) or a
+  credential id that is already registered (to this or any account) → **400** generic
+  (`"The passkey could not be verified."`). TOTP removed or the 10th passkey added meanwhile → **409**.
+  Body over **16 KiB** → **413**.
+- `PATCH /v1/account/passkeys/{id}` **or** `POST /v1/account/passkeys/{id}/rename` `{ "name": "…" }` →
+  **204**. Browsers must use the POST route: the CORS policy allows no PATCH. Invalid name → **400**;
+  unknown or another account's id → **404**.
+- `POST /v1/account/passkeys/{id}/delete` `{ "password": "…", "code": "…" }` → **204**. Unknown or another
+  account's id → **404** (checked first); wrong password or code → **403** generic.
+
+These routes share the TOTP-management limit per account (`TotpManagePerAccount`) under hardening.
+
+### Second factor after the password
+
+- `POST /v1/auth/login/passkey/options` `{ "mfaToken": "<from the 202>" }` → **200** `{ "options": { … } }`
+  with `allowCredentials` = the account's passkeys and `userVerification: "preferred"` (the password was the
+  first factor). Each call replaces the previous passkey challenge of this MFA token. A bad, expired or spent
+  token, or an account without passkeys → **401** generic (`"Passkey sign-in failed."`).
+- `POST /v1/auth/login/passkey` `{ "mfaToken": "…", "credential": { … } }` → **200** (`TokenResponse`, the
+  session exactly as `/v1/auth/login/totp` creates it). Every failure → **401** generic, and it uses up one
+  of the MFA token's **5** attempts exactly like a wrong code (reserved atomically before anything is
+  verified, same `MfaPerAccount`/`MfaPerIp` limits → **429**/**503**). The credential must be one of the
+  account's passkeys. Body over **16 KiB** → **413**.
+
+### Sign-in without email and password
+
+- `POST /v1/auth/passkey/options` (no body) → **200** `{ "assertionId": "<base64url, 43 chars>", "options": { … } }`
+  with an empty `allowCredentials` (a discoverable credential) and `userVerification: "required"`. The
+  answer is the same for everyone and reveals nothing about any account.
+- `POST /v1/auth/passkey` `{ "assertionId": "…", "credential": { … } }` → **200** (`TokenResponse`); the
+  passkey counts as **both factors**. Requires the UV flag, a `userHandle` equal to the stored credential's
+  and the account's, and an account that is verified, not disabled and still has TOTP confirmed. Every
+  failure → **401** generic (`"Passkey sign-in failed."`). Body over **16 KiB** → **413**.
+- Under hardening both routes share a per-client-address limit (`PasskeyPerAddress`, 20 burst / 10 per 60 s)
+  → **429**; no usable client address → **503**.
+
+Every successful use records `lastUsedAt` and the authenticator's signature counter; a counter that does
+not increase (when either it or the stored one is non-zero) is refused as a possible cloned authenticator
+and logged. A password reset by email does not remove passkeys; "sign out everywhere" does not touch them;
+deleting the account removes them. Account deletion and password change keep requiring the password plus a
+TOTP or recovery code.
 
 ## Encrypted-envelope sync (`/v1/sync`)
 

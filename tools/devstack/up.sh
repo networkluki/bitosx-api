@@ -7,7 +7,8 @@
 #   BITOSX_DEVSTACK_MARIADB_IMAGE   MariaDB image for the container            (default mariadb:11.8)
 #   BITOSX_DEVSTACK_DB_PORT         MariaDB port on 127.0.0.1                  (default 3407)
 #   BITOSX_DEVSTACK_API_PORT        API port on 127.0.0.1                      (default 5080)
-#   BITOSX_DEVSTACK_WEB_ORIGIN      web vault origin (CORS + email links)       (default http://127.0.0.1:8788)
+#   BITOSX_DEVSTACK_WEB_ORIGIN      web vault origin (CORS, email links, WebAuthn) (default http://localhost:8788;
+#                                   passkeys need the host localhost — an IP address is not a valid WebAuthn RP ID)
 #   BITOSX_DEVSTACK_HEALTH_TIMEOUT  seconds to wait for GET /health = 200       (default 60)
 #   BITOSX_DEVSTACK_SKIP_BUILD=1    reuse the last published build in .state/build (fast re-run)
 #   BITOSX_DEVSTACK_EXTERNAL_DB=1   use an existing server instead of a container (e.g. a CI service container):
@@ -22,7 +23,7 @@ set -euo pipefail
 
 db_port="${BITOSX_DEVSTACK_DB_PORT:-3407}"
 api_port="${BITOSX_DEVSTACK_API_PORT:-5080}"
-web_origin="${BITOSX_DEVSTACK_WEB_ORIGIN:-http://127.0.0.1:8788}"
+web_origin="${BITOSX_DEVSTACK_WEB_ORIGIN:-http://localhost:8788}"
 health_timeout="${BITOSX_DEVSTACK_HEALTH_TIMEOUT:-60}"
 skip_build="${BITOSX_DEVSTACK_SKIP_BUILD:-0}"
 db_name="bitosx"
@@ -36,7 +37,7 @@ fi
 [[ "${db_port}" != "${api_port}" ]] || devstack_die "the database and API ports must differ"
 [[ "${health_timeout}" =~ ^[0-9]+$ ]] || devstack_die "BITOSX_DEVSTACK_HEALTH_TIMEOUT must be a number of seconds"
 [[ "${web_origin}" =~ ^http://(127\.0\.0\.1|localhost|\[::1\]):[0-9]{1,5}$ ]] \
-    || devstack_die "BITOSX_DEVSTACK_WEB_ORIGIN must be a loopback http origin such as http://127.0.0.1:8788 (got '${web_origin}')"
+    || devstack_die "BITOSX_DEVSTACK_WEB_ORIGIN must be a loopback http origin such as http://localhost:8788 (got '${web_origin}')"
 [[ "${DEVSTACK_DIR}" =~ ^[A-Za-z0-9_./-]+$ ]] \
     || devstack_die "the repository path '${DEVSTACK_DIR}' contains characters the env file cannot carry unquoted"
 devstack_need dotnet curl openssl
@@ -83,13 +84,15 @@ totp_key="$(devstack_random_key)"
 
 # ---- build (in the background while the database starts) ----
 build_log="${LOG_DIR}/build.log"
-if [[ "${skip_build}" == "1" && -f "${BUILD_DIR}/api/BitosX.Api.dll" && -f "${BUILD_DIR}/devmail/BitosX.DevMail.dll" ]]; then
+if [[ "${skip_build}" == "1" && -f "${BUILD_DIR}/api/BitosX.Api.dll" && -f "${BUILD_DIR}/devmail/BitosX.DevMail.dll" \
+    && -f "${BUILD_DIR}/devauth/BitosX.DevAuthenticator.dll" ]]; then
     devstack_log "reusing the last build (BITOSX_DEVSTACK_SKIP_BUILD=1)"
 else
-    devstack_log "publishing the API and the outbox reader (Release)"
+    devstack_log "publishing the API, the outbox reader and the dev authenticator (Release)"
     (
         dotnet publish "${REPO_ROOT}/src/BitosX.Api/BitosX.Api.csproj" -c Release -o "${BUILD_DIR}/api" --nologo
         dotnet publish "${REPO_ROOT}/tools/BitosX.DevMail/BitosX.DevMail.csproj" -c Release -o "${BUILD_DIR}/devmail" --nologo
+        dotnet publish "${REPO_ROOT}/tools/BitosX.DevAuthenticator/BitosX.DevAuthenticator.csproj" -c Release -o "${BUILD_DIR}/devauth" --nologo
     ) >"${build_log}" 2>&1 &
     build_pid=$!
 fi
@@ -132,6 +135,22 @@ fi
 rm -f "${STATE_DIR}/migrate.env"
 sed 's/^/  /' "${LOG_DIR}/migrate.log" >&2
 
+# ---- passkeys: the relying party is the web origin's host, which WebAuthn requires to be a domain name ----
+# localhost qualifies (Testing allows RP ID localhost with http://localhost:<port>); 127.0.0.1 and [::1] do not, so with
+# such an origin the shipped Security:WebAuthn section (vault.bitosx.se) is blanked and passkeys are off (404).
+web_host="${web_origin#http://}"
+web_host="${web_host%:*}"
+if [[ "${web_host}" == "localhost" ]]; then
+    webauthn_rp_id="localhost"
+    webauthn_rp_name="BitosX"
+    webauthn_origin="${web_origin}"
+else
+    devstack_log "passkeys are off: ${web_origin} is an IP address, not a valid WebAuthn RP ID (use http://localhost:<port>)"
+    webauthn_rp_id=""
+    webauthn_rp_name=""
+    webauthn_origin=""
+fi
+
 # ---- the functional API (Testing: loopback http origin allowed, hardening off, mail held in the outbox) ----
 devstack_write_private "${API_ENV_FILE}" <<ENV
 $(printf '%s=%q\n' \
@@ -144,6 +163,9 @@ $(printf '%s=%q\n' \
     Security__EmailOutboxKey "${outbox_key}" \
     Security__TotpKey "${totp_key}" \
     Security__Cors__AllowedOrigins "${web_origin}" \
+    Security__WebAuthn__RelyingPartyId "${webauthn_rp_id}" \
+    Security__WebAuthn__RelyingPartyName "${webauthn_rp_name}" \
+    Security__WebAuthn__Origins__0 "${webauthn_origin}" \
     Security__PublicExposureHardening__Enabled false \
     Email__PublicBaseUrl "${web_origin}" \
     Email__HoldInOutbox true)

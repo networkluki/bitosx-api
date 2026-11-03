@@ -35,6 +35,14 @@ public sealed class AccountCapabilities
     public bool TotpEnabled { get; init; }
 
     /// <summary>
+    /// Passkeys (WebAuthn): requires <see cref="TotpEnabled"/> (a passkey is added on top of a confirmed TOTP, and
+    /// registering or removing one is confirmed with a TOTP or recovery code) plus a configured, valid
+    /// <c>Security:WebAuthn</c> section. Without it the passkey routes do not exist (404) and the second sign-in step
+    /// does not offer <c>passkey</c>; a present but invalid section fails startup.
+    /// </summary>
+    public bool PasskeysEnabled { get; init; }
+
+    /// <summary>
     /// <c>Email:HoldInOutbox</c> (Development/Testing only, refused in any other environment): verification and
     /// reset mail is queued in the outbox exactly as with delivery, but no SMTP sender or dispatcher exists, so it
     /// stays there (encrypted) for the local live stack's outbox reader. Mutually exclusive with

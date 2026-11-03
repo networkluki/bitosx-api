@@ -4,7 +4,8 @@
 # verification commands at the end of docs/DEPLOYMENT.md into assertions that need no proxy in front:
 #
 #   - Production refuses to start when unsafe: hardening off, a wildcard listener, Email:HoldInOutbox, an http CORS
-#     origin;
+#     origin, an http WebAuthn origin, a localhost or IP WebAuthn RP ID, an RP ID that does not cover the origin;
+#   - it starts with the shipped Security:WebAuthn section and serves passkey options for RP ID vault.bitosx.se;
 #   - the listener is loopback-only (and not reachable on another local address);
 #   - OpenAPI is absent (404), /health and /version answer 200;
 #   - CORS is exactly as documented: the vault origin's preflights pass (envelope PUT included), https://bitosx.se
@@ -97,6 +98,12 @@ expect_refused "hardening disabled" "PublicExposureHardening" Security__PublicEx
 expect_refused "a wildcard listener" "must bind to loopback" "Kestrel__Endpoints__Http__Url=http://0.0.0.0:${port}"
 expect_refused "Email:HoldInOutbox" "Email:HoldInOutbox" Email__HoldInOutbox=true
 expect_refused "an http CORS origin" "https://" Security__Cors__AllowedOrigins=http://127.0.0.1:8788
+expect_refused "an http WebAuthn origin" "Security:WebAuthn:Origins" Security__WebAuthn__Origins__0=http://vault.bitosx.se
+expect_refused "a localhost WebAuthn RP ID" "Security:WebAuthn:RelyingPartyId" \
+    Security__WebAuthn__RelyingPartyId=localhost Security__WebAuthn__Origins__0=http://localhost:8788
+expect_refused "an IP address as WebAuthn RP ID" "Security:WebAuthn:RelyingPartyId" \
+    Security__WebAuthn__RelyingPartyId=127.0.0.1 Security__WebAuthn__Origins__0=https://127.0.0.1
+expect_refused "a WebAuthn RP ID that does not cover the origin" "registrable suffix" Security__WebAuthn__Origins__0=https://bitosx.example
 
 # ---- 2. the Production instance ----
 write_env "${smoke_env}"
@@ -177,6 +184,19 @@ code="$(hdr "${work}/h" -H 'Host: attacker.example' "${base}/health")"
 [[ "${code}" == "400" ]] || fail "Host: attacker.example: expected 400 (AllowedHosts), got ${code}"
 pass "Host filtering refuses an unknown Host (400)"
 
+# ---- 4b. passkeys with the shipped relying party ----
+code="$(hdr "${work}/h" -X POST "${base}/v1/auth/passkey/options" "${via_proxy[@]}")"
+[[ "${code}" == "200" ]] || fail "POST /v1/auth/passkey/options: expected 200, got ${code}"
+python3 -I -c '
+import json, sys
+o = json.load(open(sys.argv[1]))["options"]
+assert o["rpId"] == "vault.bitosx.se", o["rpId"]
+assert o["userVerification"] == "required" and o["allowCredentials"] == [], o
+' "${work}/h.body" || fail "the passwordless options are not for RP ID vault.bitosx.se with UV required and no allow list"
+code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "${base}/v1/auth/passkey/options")"
+[[ "${code}" == "503" ]] || fail "hardened passkey options without a proxy-supplied client address: expected 503, got ${code}"
+pass "passkeys: options for RP ID vault.bitosx.se (UV required); per-address limiter fails closed without a client address"
+
 # ---- 5. CORS exactly as documented ----
 code="$(hdr "${work}/h" -H "Origin: ${status_page}" "${base}/health")"
 [[ "$(header_value "${work}/h" access-control-allow-origin)" == "${status_page}" ]] || fail "GET /health from ${status_page} is not readable"
@@ -207,6 +227,12 @@ code="$(hdr "${work}/h" -X OPTIONS "${base}/v1/auth/login" -H "Origin: ${vault}"
     || fail "the login preflight from ${vault} is not answered (status ${code})"
 has_header "${work}/h" access-control-allow-credentials && fail "the login preflight allows credentials"
 pass "${vault}: login preflight passes (204, no credentials)"
+
+code="$(hdr "${work}/h" -X OPTIONS "${base}/v1/auth/passkey" -H "Origin: ${vault}" \
+    -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type')"
+[[ "${code}" == "204" && "$(header_value "${work}/h" access-control-allow-origin)" == "${vault}" ]] \
+    || fail "the passkey sign-in preflight from ${vault} is not answered (status ${code})"
+pass "${vault}: passkey sign-in preflight passes (204)"
 
 for origin in "https://attacker.example" "http://vault.bitosx.se" "https://vault.bitosx.se.attacker.example" "null"; do
     hdr "${work}/h" -H "Origin: ${origin}" "${base}/health" >/dev/null

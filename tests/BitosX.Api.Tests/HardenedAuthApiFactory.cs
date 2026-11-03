@@ -128,7 +128,7 @@ public sealed class HardenedAuthApiFactory : WebApplicationFactory<Program>
         await using var c = new MySqlConnection(_testDbConnectionString);
         await c.OpenAsync();
         await using var cmd = c.CreateCommand();
-        cmd.CommandText = "DELETE FROM refresh_tokens; DELETE FROM sessions; DELETE FROM email_outbox; DELETE FROM accounts;";
+        cmd.CommandText = "DELETE FROM webauthn_challenges; DELETE FROM refresh_tokens; DELETE FROM sessions; DELETE FROM email_outbox; DELETE FROM accounts;";
         await cmd.ExecuteNonQueryAsync();
     }
 

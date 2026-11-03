@@ -2,16 +2,19 @@ using BitosX.Application.Abstractions.Persistence;
 using BitosX.Application.Accounts;
 using BitosX.Application.Email;
 using BitosX.Application.Mfa;
+using BitosX.Application.Passkeys;
 using BitosX.Application.Security;
 using BitosX.Application.Sessions;
 using BitosX.Application.Verification;
 using BitosX.Infrastructure.Email;
+using BitosX.Infrastructure.Passkeys;
 using BitosX.Infrastructure.Persistence;
 using BitosX.Infrastructure.Security;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace BitosX.Infrastructure.Accounts;
 
@@ -21,6 +24,7 @@ namespace BitosX.Infrastructure.Accounts;
 /// run with SMTP delivery disabled:
 ///   - AccountCore        : DB + password hashing (+ future login/session/JWT)
 ///   - Totp               : second factor on top of Login (Security:TotpKey)
+///   - Passkeys           : WebAuthn on top of Totp (Security:WebAuthn)
 ///   - EmailVerification  : register/verify/resend + forgot/reset-password + outbox persistence (pepper + outbox key)
 ///   - EmailDelivery      : Gmail SMTP sender + background dispatcher (SMTP credentials)
 ///
@@ -51,6 +55,10 @@ public static class AccountsServiceCollectionExtensions
             throw new InvalidOperationException(
                 $"{HoldInOutboxKey} is a Development/Testing-only setting (mail would never be delivered); it is refused in this environment.");
         }
+
+        // The WebAuthn relying party is validated whenever it is configured (also without a database), so an unsafe
+        // origin or RP ID (http, localhost, an IP address outside Development/Testing) always refuses to start.
+        var webAuthn = WebAuthnConfiguration.BindAndValidate(configuration, allowDevelopmentOnlySettings);
 
         var accountCore = !string.IsNullOrWhiteSpace(configuration.GetConnectionString("Bitosx"));
         if (!accountCore)
@@ -155,6 +163,7 @@ public static class AccountsServiceCollectionExtensions
             EmailHeldInOutbox = holdRequested,
             LoginEnabled = login,
             TotpEnabled = totp,
+            PasskeysEnabled = totp && webAuthn is not null,
         };
     }
 
@@ -404,6 +413,10 @@ public static class AccountsServiceCollectionExtensions
         services.AddSingleton(new SecondFactorAvailability(!string.IsNullOrWhiteSpace(configuration["Security:TotpKey"])));
         services.AddSingleton<ITotpStore>(_ => new TotpStore(connectionFactory));
         services.AddSingleton<IMfaChallengeStore>(_ => new MfaChallengeStore(connectionFactory));
+        // Passkey persistence is DB only, like TOTP's: TOTP disable must see an account's passkeys (and refuse) even
+        // when the Passkeys capability is off. The WebAuthn crypto and routes are AddBitosxPasskeys.
+        services.AddSingleton<IPasskeyStore>(_ => new PasskeyStore(connectionFactory));
+        services.AddSingleton<IWebAuthnChallengeStore>(_ => new WebAuthnChallengeStore(connectionFactory));
 
         // Application orchestration services (per-request).
         services.AddScoped<ILoginService, LoginService>();
@@ -452,6 +465,32 @@ public static class AccountsServiceCollectionExtensions
         services.TryAddSingleton<IMfaAttemptLimiter, UnlimitedMfaAttempts>();
         services.AddScoped<IMfaLoginService, MfaLoginService>();
         services.AddScoped<ITotpEnrollmentService, TotpEnrollmentService>();
+        return services;
+    }
+
+    // ---- Passkeys: WebAuthn relying party + passkey management and sign-in (on top of Totp) ----
+
+    /// <summary>
+    /// Composes the Passkeys capability on top of Totp: the validated <c>Security:WebAuthn</c> relying party (fail
+    /// closed: a configured but invalid section throws, an absent one is refused here because the capability needs
+    /// it), the Fido2-backed verifier, the security log and the passkey services. <paramref name="allowLocalhost"/>
+    /// is true only in Development/Testing.
+    /// </summary>
+    public static IServiceCollection AddBitosxPasskeys(this IServiceCollection services, IConfiguration configuration, bool allowLocalhost = false)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        var options = WebAuthnConfiguration.BindAndValidate(configuration, allowLocalhost)
+            ?? throw new InvalidOperationException($"{WebAuthnOptions.SectionName} is required for Passkeys.");
+
+        services.TryAddSingletonTimeProvider();
+        services.AddSingleton(options);
+        services.AddSingleton(new PasskeyAvailability(true));
+        services.AddSingleton<IWebAuthnRelyingParty>(new Fido2RelyingParty(options));
+        services.AddSingleton<IPasskeySecurityLog>(sp => new LoggerPasskeySecurityLog(sp.GetRequiredService<ILogger<LoggerPasskeySecurityLog>>()));
+        services.AddScoped<IPasskeyManagementService, PasskeyManagementService>();
+        services.AddScoped<IPasskeyLoginService, PasskeyLoginService>();
         return services;
     }
 

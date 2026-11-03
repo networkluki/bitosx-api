@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging;
 namespace BitosX.Infrastructure.Housekeeping;
 
 /// <summary>Counts deleted by one housekeeping run.</summary>
-public sealed record HousekeepingResult(int EmailChallenges, int MfaChallenges, int Sessions);
+public sealed record HousekeepingResult(int EmailChallenges, int MfaChallenges, int Sessions, int WebAuthnChallenges = 0);
 
 /// <summary>
 /// One housekeeping pass: for each kind of dead row, delete batches through the store until a batch comes back
@@ -38,13 +38,16 @@ public sealed class HousekeepingRunner
         var email = await DrainAsync(batch => _store.DeleteExpiredEmailChallengesAsync(cutoff, batch, cancellationToken), cancellationToken).ConfigureAwait(false);
         var mfa = await DrainAsync(batch => _store.DeleteExpiredMfaChallengesAsync(cutoff, batch, cancellationToken), cancellationToken).ConfigureAwait(false);
         var sessions = await DrainAsync(batch => _store.DeleteDeadSessionsAsync(cutoff, idleCutoff, batch, cancellationToken), cancellationToken).ConfigureAwait(false);
+        // Expired WebAuthn ceremonies are useless at once (no retention window): anonymous sign-in options create them.
+        var now = _clock.GetUtcNow().UtcDateTime;
+        var webAuthn = await DrainAsync(batch => _store.DeleteExpiredWebAuthnChallengesAsync(now, batch, cancellationToken), cancellationToken).ConfigureAwait(false);
 
-        var result = new HousekeepingResult(email, mfa, sessions);
-        if (email + mfa + sessions > 0)
+        var result = new HousekeepingResult(email, mfa, sessions, webAuthn);
+        if (email + mfa + sessions + webAuthn > 0)
         {
             _logger.LogInformation(
-                "Housekeeping deleted {EmailChallenges} email challenges, {MfaChallenges} MFA challenges and {Sessions} sessions (with their refresh tokens).",
-                email, mfa, sessions);
+                "Housekeeping deleted {EmailChallenges} email challenges, {MfaChallenges} MFA challenges, {Sessions} sessions (with their refresh tokens) and {WebAuthnChallenges} WebAuthn challenges.",
+                email, mfa, sessions, webAuthn);
         }
 
         return result;

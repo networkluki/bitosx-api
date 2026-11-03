@@ -13,6 +13,12 @@ public interface IHousekeepingStore
     Task<int> DeleteExpiredMfaChallengesAsync(DateTime cutoffUtc, int batchSize, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// WebAuthn ceremonies (passkey registration and sign-in challenges) that expired before <paramref name="cutoffUtc"/>.
+    /// They carry no history worth keeping, so the caller passes "now", not the retention cutoff.
+    /// </summary>
+    Task<int> DeleteExpiredWebAuthnChallengesAsync(DateTime cutoffUtc, int batchSize, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Sessions revoked, absolute-expired, or idle-expired before <paramref name="cutoffUtc"/> (idle-expired means
     /// <c>last_seen_at &lt; <paramref name="idleCutoffUtc"/></c>); their refresh tokens cascade.
     /// </summary>

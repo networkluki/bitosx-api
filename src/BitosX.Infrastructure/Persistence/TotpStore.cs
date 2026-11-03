@@ -156,17 +156,29 @@ public sealed class TotpStore : ITotpStore
         return true;
     }
 
-    public async Task DisableAsync(Guid accountId, CancellationToken cancellationToken = default)
+    public async Task<bool> DisableAsync(Guid accountId, CancellationToken cancellationToken = default)
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         await using var tx = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
         // Same lock order as confirm and regenerate: the account_totp row first, then the recovery codes.
         await connection.ExecuteAsync(new CommandDefinition(
             "SELECT account_id FROM account_totp WHERE account_id = @accountId FOR UPDATE;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        // Passkeys exist only on top of TOTP. A passkey registration takes the same account_totp lock before it
+        // inserts, so this locking (current) read sees every committed passkey and none can be added until we commit.
+        var passkeys = await connection.ExecuteScalarAsync<long>(new CommandDefinition(
+            "SELECT COUNT(*) FROM webauthn_credentials WHERE account_id = @accountId FOR UPDATE;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        if (passkeys > 0)
+        {
+            await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            return false;
+        }
+
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM account_recovery_codes WHERE account_id = @accountId;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM mfa_challenges WHERE account_id = @accountId;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
         await connection.ExecuteAsync(new CommandDefinition("DELETE FROM account_totp WHERE account_id = @accountId;", new { accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
         await tx.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     private static async Task WriteRecoveryCodesAsync(

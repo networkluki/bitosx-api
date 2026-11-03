@@ -168,6 +168,14 @@ if (capabilities.AccountCoreEnabled)
             builder.Services.AddBitosxTotp(builder.Configuration);
         }
 
+        // Passkeys (WebAuthn) ride on Totp and are enabled by a valid Security:WebAuthn section (validated at
+        // capability detection: https origins and a real domain as RP ID outside Development/Testing). Without it the
+        // passkey routes are not mapped (404) and the second sign-in step does not offer "passkey".
+        if (capabilities.PasskeysEnabled)
+        {
+            builder.Services.AddBitosxPasskeys(builder.Configuration, developmentOrTesting);
+        }
+
         builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
         builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
             .Configure<JwtTokenValidationParametersFactory>((options, factory) =>
@@ -242,13 +250,18 @@ if (capabilities.LoginEnabled)
     app.MapLoginEndpoints();
     app.MapAccountEndpoints();
     app.MapSyncEndpoints();
+
+    if (capabilities.PasskeysEnabled)
+    {
+        app.MapPasskeyEndpoints();
+    }
 }
 
 // Capability state is logged safely at startup (booleans only, no secrets) and is
 // deliberately NOT exposed on the public /health endpoint.
 app.Logger.LogInformation(
-    "BitosX account capabilities: AccountCore={AccountCore} EmailVerification={EmailVerification} EmailDelivery={EmailDelivery} EmailHeldInOutbox={EmailHeldInOutbox} Login={Login} Totp={Totp}",
-    capabilities.AccountCoreEnabled, capabilities.EmailVerificationEnabled, capabilities.EmailDeliveryEnabled, capabilities.EmailHeldInOutbox, capabilities.LoginEnabled, capabilities.TotpEnabled);
+    "BitosX account capabilities: AccountCore={AccountCore} EmailVerification={EmailVerification} EmailDelivery={EmailDelivery} EmailHeldInOutbox={EmailHeldInOutbox} Login={Login} Totp={Totp} Passkeys={Passkeys}",
+    capabilities.AccountCoreEnabled, capabilities.EmailVerificationEnabled, capabilities.EmailDeliveryEnabled, capabilities.EmailHeldInOutbox, capabilities.LoginEnabled, capabilities.TotpEnabled, capabilities.PasskeysEnabled);
 if (capabilities.EmailHeldInOutbox)
 {
     app.Logger.LogWarning("Email:HoldInOutbox is set: verification and reset mail is queued but never delivered (Development/Testing only).");

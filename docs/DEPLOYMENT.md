@@ -113,6 +113,26 @@ Phase 8 adds migrations 0006 (envelope `LONGBLOB`, revision tombstones), 0007 (b
 uniqueness, housekeeping indexes). All are online `ALTER TABLE`s on small tables except `vault_blobs`
 (0006 rewrites it; schedule the migration in a quiet minute if many vaults are stored).
 
+Phase 10 adds migration 0009 (passkeys): one nullable unique column on `accounts` (`webauthn_user_handle`)
+and two new tables (`webauthn_credentials`, `webauthn_challenges`). The `ALTER TABLE accounts` is online on
+MariaDB 11.8; no grant changes (the runtime account's DML on `bitosx.*` covers the new tables).
+
+## Configuration added in phase 10
+
+| Key | Default | Notes |
+|---|---|---|
+| `Security:WebAuthn:RelyingPartyId` | `vault.bitosx.se` (appsettings.json) | The WebAuthn RP ID passkeys are scoped to. Lower-case domain name with at least two labels; never an IP address; must equal, or be a dot-boundary suffix of, every origin's host. `localhost` only in Development/Testing. Changing it later orphans every registered passkey (they are bound to the RP ID). |
+| `Security:WebAuthn:RelyingPartyName` | `BitosX` (appsettings.json) | Shown by authenticators at registration; 1-64 characters, no control characters. |
+| `Security:WebAuthn:Origins` | `["https://vault.bitosx.se"]` (appsettings.json) | List (or one `;`/`,`-separated string) of exact origins (`scheme://host[:port]`, nothing else), at most 10, `https://` only; `http://localhost:<port>` only in Development/Testing. |
+| `Security:PublicExposureHardening:PasskeyPerAddress` | 20 / 10 / 60 s | Passwordless passkey options + sign-in per trusted client IP (one bucket for both), validated. |
+
+The Passkeys capability is on when Login, Totp (`Security:TotpKey`) and a valid `Security:WebAuthn` section
+are present. Any key of the section set makes all of it required and validated at startup (fail closed — an
+`http://` origin, a `localhost` or IP-address RP ID, or an RP ID that does not cover an origin refuses to
+start outside Development/Testing). To turn passkeys off, set all three keys to empty values (the routes then
+answer 404 and the second sign-in step does not offer `passkey`); existing passkeys stay stored, and TOTP still
+cannot be disabled on an account that has them. Nothing in the section is a secret.
+
 ## Configuration added in phase 9
 
 | Key | Default | Notes |

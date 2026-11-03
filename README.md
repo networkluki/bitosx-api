@@ -15,7 +15,8 @@ for the BitosX desktop and web vault clients.
 - Infrastructure endpoints `GET /health` (liveness only) and `GET /version`.
 - Email-first registration with email verification, login with refresh-token rotation and
   sessions, password reset by emailed link, password change while signed in, password-confirmed
-  account deletion, TOTP two-factor sign-in with recovery codes, and encrypted-envelope sync.
+  account deletion, TOTP two-factor sign-in with recovery codes, passkeys (WebAuthn, on top of TOTP: as
+  the second factor or for sign-in without email and password), and encrypted-envelope sync.
 - Rate limiting, bounded Argon2id work, CORS for the web vault (and `/health`+`/version` for the
   product page), RFC7807 ProblemDetails, correlation ids, UTC timestamps, background outbox
   delivery and housekeeping.

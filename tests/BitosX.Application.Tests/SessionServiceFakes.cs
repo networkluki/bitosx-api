@@ -219,7 +219,8 @@ internal sealed class FakeTotpStore : BitosX.Application.Abstractions.Persistenc
     public Task<int> CountUnusedRecoveryCodesAsync(Guid accountId, CancellationToken ct = default) => Task.FromResult(UnusedRecoveryCodes);
     public Task<bool> ReplaceRecoveryCodesAsync(Guid accountId, IReadOnlyList<byte[]> verifiers, DateTime now, CancellationToken ct = default)
     { ReplaceCalls++; LastVerifiers = verifiers; return Task.FromResult(ReplaceResult); }
-    public Task DisableAsync(Guid accountId, CancellationToken ct = default) { DisableCalls++; return Task.CompletedTask; }
+    public bool DisableResult { get; set; } = true;
+    public Task<bool> DisableAsync(Guid accountId, CancellationToken ct = default) { DisableCalls++; return Task.FromResult(DisableResult); }
 }
 
 /// <summary>In-memory IMfaChallengeStore fake.</summary>

@@ -4,18 +4,24 @@
 # tools/devstack/.state/env when they are unset). Proves the stack works the way the client live suites use it:
 #
 #   register -> verify token via the mail command -> verify-email (sets the password) -> login -> /me ->
-#   TOTP enroll + confirm (RFC 6238 code computed here) -> login + second step -> PUT/GET envelope (+409) ->
+#   TOTP enroll + confirm (RFC 6238 code computed here) -> login + second step -> passkey registration, passkey as
+#   the second step, passwordless sign-in, rename, TOTP disable refused (409) -> PUT/GET envelope (+409) ->
 #   CORS preflight from the web origin -> change password (recovery code) -> old password refused ->
-#   forgot + reset via the mail token -> delete account (recovery code) -> sign-in fails.
+#   forgot + reset via the mail token -> passwordless sign-in still works -> delete account -> sign-in fails.
 #
-# Needs curl and python3. Fails on the first mismatch with a clear line on stderr.
+# The passkey steps use tools/BitosX.DevAuthenticator (published by up.sh into .state/build/devauth): the test
+# suite's software authenticator, answering the API's options exactly as a browser at BITOSX_LIVE_WEB_ORIGIN with a
+# platform authenticator would (ES256, "none" attestation, UV). They are skipped, with a log line, when the stack
+# has passkeys off (a web origin that is an IP address rather than http://localhost:<port>).
+#
+# Needs curl, python3 and dotnet. Fails on the first mismatch with a clear line on stderr.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR
 
 # shellcheck source=lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-devstack_need curl python3
+devstack_need curl python3 dotnet
 
 if [[ -z "${BITOSX_LIVE_API_URL:-}" && -f "${CLIENT_ENV_FILE}" ]]; then
     set -a
@@ -121,6 +127,8 @@ req POST /v1/account/totp/confirm "{\"code\":\"$(totp "${secret}" 0)\"}" "${acce
 expect 200 "TOTP confirm (current step)"
 recovery1="$(json "${BODY}" 'd["recoveryCodes"][0]')"
 recovery2="$(json "${BODY}" 'd["recoveryCodes"][1]')"
+recovery3="$(json "${BODY}" 'd["recoveryCodes"][2]')"
+recovery4="$(json "${BODY}" 'd["recoveryCodes"][3]')"
 
 req POST /v1/auth/login "{\"email\":\"${email}\",\"password\":\"${password}\"}"
 expect 202 "login now asks for the second factor"
@@ -129,6 +137,79 @@ mfa_token="$(json "${BODY}" 'd["mfaToken"]')"
 req POST /v1/auth/login/totp "{\"mfaToken\":\"${mfa_token}\",\"code\":\"$(totp "${secret}" 1)\"}"
 expect 200 "second sign-in step with a TOTP code"
 access="$(json "${BODY}" 'd["accessToken"]')"
+
+# ---- passkeys: a software authenticator answers as a browser at the web origin would ----
+devauth_dll="${BUILD_DIR}/devauth/BitosX.DevAuthenticator.dll"
+passkey_state="${work}/passkeys.json"
+# devauth <create|get> < options-response: the credential JSON (one line), as PublicKeyCredential.toJSON() gives it.
+devauth() { (cd "$(dirname "${devauth_dll}")" && dotnet "${devauth_dll}" "$1" --origin "${BITOSX_LIVE_WEB_ORIGIN}" --state "${passkey_state}" <"$2"); }
+
+passkeys=0
+req GET /v1/account/passkeys "" "${access}"
+if [[ "${STATUS}" == "404" ]]; then
+    devstack_log "passkeys are off on this stack (web origin ${BITOSX_LIVE_WEB_ORIGIN} is not http://localhost:<port>); skipping the passkey steps"
+else
+    passkeys=1
+    [[ -f "${devauth_dll}" ]] || fail "the dev authenticator is not built (${devauth_dll}); run tools/devstack/up.sh"
+    expect 200 "GET /v1/account/passkeys"
+    [[ "$(json "${BODY}" 'len(d["passkeys"]), d["max"]')" == "(0, 10)" ]] || fail "a new account should have no passkeys (max 10)"
+
+    req POST /v1/account/passkeys/registration/options "{\"password\":\"${password}\",\"code\":\"${recovery3}\"}" "${access}"
+    expect 200 "passkey registration options (password + recovery code)"
+    web_host="${BITOSX_LIVE_WEB_ORIGIN#http://}"
+    [[ "$(json "${BODY}" 'd["options"]["rp"]["id"]')" == "${web_host%:*}" ]] || fail "the RP ID is not the web origin's host"
+    [[ "$(json "${BODY}" 'd["options"]["authenticatorSelection"]["residentKey"], d["options"]["authenticatorSelection"]["userVerification"], d["options"]["attestation"]')" \
+        == "('required', 'required', 'none')" ]] || fail "the creation options do not require a resident key and UV with attestation none"
+    registration_id="$(json "${BODY}" 'd["registrationId"]')"
+    credential="$(devauth create "${BODY}")"
+    registration="{\"registrationId\":\"${registration_id}\",\"name\":\"selftest passkey\",\"credential\":${credential}}"
+    req POST /v1/account/passkeys/registration "${registration}" "${access}"
+    expect 201 "passkey registration"
+    passkey_id="$(json "${BODY}" 'd["id"]')"
+    req POST /v1/account/passkeys/registration "${registration}" "${access}"
+    expect 410 "the registration id is single use"
+
+    req POST /v1/account/totp/disable "{\"password\":\"${password}\",\"code\":\"${recovery4}\"}" "${access}"
+    expect 409 "TOTP disable is refused while a passkey exists"
+
+    req POST /v1/auth/login "{\"email\":\"${email}\",\"password\":\"${password}\"}"
+    expect 202 "login asks for the second factor"
+    [[ "$(json "${BODY}" 'd["methods"]')" == "['totp', 'recovery', 'passkey']" ]] || fail "the second step does not offer the passkey"
+    mfa_token="$(json "${BODY}" 'd["mfaToken"]')"
+    req POST /v1/auth/login/passkey/options "{\"mfaToken\":\"${mfa_token}\"}"
+    expect 200 "second-step passkey options"
+    assertion="$(devauth get "${BODY}")"
+    req POST /v1/auth/login/passkey "{\"mfaToken\":\"${mfa_token}\",\"credential\":${assertion}}"
+    expect 200 "second sign-in step with the passkey"
+    req POST /v1/auth/login/passkey "{\"mfaToken\":\"${mfa_token}\",\"credential\":${assertion}}"
+    expect 401 "the same assertion again"
+
+    req POST /v1/auth/passkey/options
+    expect 200 "passwordless options"
+    [[ "$(json "${BODY}" 'len(d["options"]["allowCredentials"]), d["options"]["userVerification"]')" == "(0, 'required')" ]] \
+        || fail "passwordless options must allow any discoverable credential and require UV"
+    assertion_id="$(json "${BODY}" 'd["assertionId"]')"
+    assertion="$(devauth get "${BODY}")"
+    req POST /v1/auth/passkey "{\"assertionId\":\"${assertion_id}\",\"credential\":${assertion}}"
+    expect 200 "sign-in with the passkey alone (no email, no password)"
+    req GET /v1/account/me "" "$(json "${BODY}" 'd["accessToken"]')"
+    expect 200 "the passkey session works"
+    [[ "$(json "${BODY}" 'd["email"]')" == "${email}" ]] || fail "the passkey signed in another account"
+
+    req POST "/v1/account/passkeys/${passkey_id}/rename" '{"name":"renamed by selftest"}' "${access}"
+    expect 204 "rename the passkey"
+    req GET /v1/account/passkeys "" "${access}"
+    expect 200 "GET /v1/account/passkeys"
+    [[ "$(json "${BODY}" 'd["passkeys"][0]["name"], "lastUsedAt" in d["passkeys"][0]')" == "('renamed by selftest', True)" ]] \
+        || fail "the passkey list does not show the new name and the last use"
+
+    cors_headers="$(curl -s -D - -o /dev/null -X OPTIONS "${api}/v1/auth/passkey" \
+        -H "Origin: ${BITOSX_LIVE_WEB_ORIGIN}" -H 'Access-Control-Request-Method: POST' \
+        -H 'Access-Control-Request-Headers: content-type' | tr -d '\r')"
+    grep -qi "^access-control-allow-origin: ${BITOSX_LIVE_WEB_ORIGIN}\$" <<<"${cors_headers}" \
+        || fail "the passkey sign-in preflight from ${BITOSX_LIVE_WEB_ORIGIN} is not allowed"
+    pass "CORS preflight from ${BITOSX_LIVE_WEB_ORIGIN} allows the passkey sign-in"
+fi
 
 # ---- envelope sync ----
 envelope_json='{"version":1,"kdf":"argon2id","kdfParameters":{"memoryKiB":262144,"iterations":3,"parallelism":4,"keyLengthBytes":32},"salt":"AAAAAAAAAAAAAAAAAAAAAA==","algorithm":"AES-256-GCM","keyWrapNonce":"AAAAAAAAAAAAAAAA","encryptedVaultKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","contentNonce":"AAAAAAAAAAAAAAAA","ciphertext":"AAAA"}'
@@ -179,6 +260,15 @@ mfa_token="$(json "${BODY}" 'd["mfaToken"]')"
 req POST /v1/auth/login/totp "{\"mfaToken\":\"${mfa_token}\",\"code\":\"${recovery2}\"}"
 expect 200 "second sign-in step with a recovery code"
 access="$(json "${BODY}" 'd["accessToken"]')"
+
+if [[ "${passkeys}" == "1" ]]; then
+    # A password reset by email keeps the passkeys.
+    req POST /v1/auth/passkey/options
+    expect 200 "passwordless options"
+    assertion_id="$(json "${BODY}" 'd["assertionId"]')"
+    req POST /v1/auth/passkey "{\"assertionId\":\"${assertion_id}\",\"credential\":$(devauth get "${BODY}")}"
+    expect 200 "passwordless sign-in after the password reset (passkeys are kept)"
+fi
 
 # ---- delete the account ----
 req POST /v1/account/delete "{\"password\":\"${reset_password}\"}" "${access}"

@@ -33,6 +33,14 @@ public sealed class HousekeepingStore : IHousekeepingStore
             new { cutoffUtc, batchSize }, cancellationToken: cancellationToken)).ConfigureAwait(false);
     }
 
+    public async Task<int> DeleteExpiredWebAuthnChallengesAsync(DateTime cutoffUtc, int batchSize, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        return await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM webauthn_challenges WHERE expires_at < @cutoffUtc ORDER BY expires_at LIMIT @batchSize;",
+            new { cutoffUtc, batchSize }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+    }
+
     public async Task<int> DeleteDeadSessionsAsync(DateTime cutoffUtc, DateTime idleCutoffUtc, int batchSize, CancellationToken cancellationToken = default)
     {
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);

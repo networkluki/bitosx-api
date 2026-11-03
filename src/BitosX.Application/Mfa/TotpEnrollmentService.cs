@@ -19,7 +19,15 @@ public sealed record TotpConfirmation(TotpConfirmResult Outcome, IReadOnlyList<s
     public override string ToString() => $"TotpConfirmation {{ Outcome = {Outcome}, RecoveryCodes = <redacted> }}";
 }
 
-public enum TotpManageOutcome { Succeeded, InvalidCredentials, NotEnabled }
+public enum TotpManageOutcome
+{
+    Succeeded,
+    InvalidCredentials,
+    NotEnabled,
+
+    /// <summary>Disable only: the account has passkeys, which exist only on top of TOTP; remove them first (409).</summary>
+    PasskeysExist,
+}
 
 public sealed record TotpRecoveryCodesResult(TotpManageOutcome Outcome, IReadOnlyList<string> RecoveryCodes)
 {
@@ -38,7 +46,7 @@ public interface ITotpEnrollmentService
     /// <summary>A first valid code turns the pending secret into the account's second factor and issues recovery codes (shown once).</summary>
     Task<TotpConfirmation> ConfirmAsync(Guid accountId, string code, CancellationToken cancellationToken = default);
 
-    /// <summary>Password + a valid code (TOTP or recovery) removes the second factor.</summary>
+    /// <summary>Password + a valid code (TOTP or recovery) removes the second factor; refused while the account has passkeys.</summary>
     Task<TotpManageOutcome> DisableAsync(Guid accountId, string password, string code, CancellationToken cancellationToken = default);
 
     /// <summary>Password + a valid code replaces every recovery code; the new set is returned once.</summary>
@@ -60,6 +68,7 @@ public sealed class TotpEnrollmentService : ITotpEnrollmentService
     private readonly MfaCodeVerifier _codes;
     private readonly TotpOptions _options;
     private readonly TimeProvider _clock;
+    private readonly IPasskeyStore? _passkeys;
 
     public TotpEnrollmentService(
         IAccountRepository accounts,
@@ -68,7 +77,8 @@ public sealed class TotpEnrollmentService : ITotpEnrollmentService
         ITotpCrypto crypto,
         MfaCodeVerifier codes,
         TotpOptions options,
-        TimeProvider clock)
+        TimeProvider clock,
+        IPasskeyStore? passkeys = null)
     {
         _accounts = accounts;
         _passwordHasher = passwordHasher;
@@ -77,6 +87,7 @@ public sealed class TotpEnrollmentService : ITotpEnrollmentService
         _codes = codes;
         _options = options;
         _clock = clock;
+        _passkeys = passkeys;
     }
 
     public async Task<TotpStatus> GetStatusAsync(Guid accountId, CancellationToken cancellationToken = default)
@@ -149,14 +160,24 @@ public sealed class TotpEnrollmentService : ITotpEnrollmentService
 
     public async Task<TotpManageOutcome> DisableAsync(Guid accountId, string password, string code, CancellationToken cancellationToken = default)
     {
+        // Passkeys are added on top of TOTP and never replace it: refuse before the password and code are checked, so
+        // the refusal never uses up a code. The store re-checks under its lock.
+        if (_passkeys is not null
+            && (await _store.GetAsync(accountId, cancellationToken).ConfigureAwait(false)) is { IsConfirmed: true }
+            && await _passkeys.CountAsync(accountId, cancellationToken).ConfigureAwait(false) > 0)
+        {
+            return TotpManageOutcome.PasskeysExist;
+        }
+
         var outcome = await ConfirmPasswordAndCodeAsync(accountId, password, code, cancellationToken).ConfigureAwait(false);
         if (outcome != TotpManageOutcome.Succeeded)
         {
             return outcome;
         }
 
-        await _store.DisableAsync(accountId, cancellationToken).ConfigureAwait(false);
-        return TotpManageOutcome.Succeeded;
+        return await _store.DisableAsync(accountId, cancellationToken).ConfigureAwait(false)
+            ? TotpManageOutcome.Succeeded
+            : TotpManageOutcome.PasskeysExist;
     }
 
     public async Task<TotpRecoveryCodesResult> RegenerateRecoveryCodesAsync(Guid accountId, string password, string code, CancellationToken cancellationToken = default)
