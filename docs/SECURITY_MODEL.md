@@ -91,8 +91,11 @@ opts in through CORS. The policy (`BrowserCorsOptions`, configured under
 
 - **Exact `https://` origins only**, semicolon-separated in `Security:Cors:AllowedOrigins`
   (the repository `appsettings.json` lists `https://vault.bitosx.se`). No wildcard, no
-  `http://` (not even loopback), no path, trailing slash, query, fragment, userinfo or
-  uppercase: anything but `https://host[:port]` in canonical form refuses startup. A
+  `http://`, no path, trailing slash, query, fragment, userinfo or
+  uppercase: anything but `https://host[:port]` in canonical form refuses startup. The one
+  exception is an exact loopback `http://` origin (`localhost`, `127.0.0.1`, `[::1]`) in the
+  Development and Testing environments only, for the local live stack (`tools/devstack`); in
+  Production such an origin refuses startup like any other `http://` origin. A
   browser's `Origin` header must match byte for byte; `vault.bitosx.se.attacker.example`
   or a different port gets no CORS headers.
 - **Inert when empty.** With no origin configured (neither list) the CORS middleware is not

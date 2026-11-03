@@ -68,6 +68,33 @@ curl http://127.0.0.1:5080/health
 curl http://127.0.0.1:5080/version
 ```
 
+## Against a real database (MariaDB)
+
+```bash
+# The API's own test suites on a throwaway MariaDB container (11.8 by default):
+tools/devstack/test-db.sh up
+set -a; . tools/devstack/.state/test-db.env; set +a
+dotnet test tests/BitosX.Application.Tests -c Release
+dotnet test tests/BitosX.Infrastructure.Tests -c Release   # one project after another:
+dotnet test tests/BitosX.Api.Tests -c Release              # they reset the same tables
+tools/devstack/test-db.sh down
+
+# The local live stack for the client live suites (web vault, desktop):
+tools/devstack/up.sh          # writes tools/devstack/.state/env (BITOSX_LIVE_API_URL, _WEB_ORIGIN, _MAIL_CMD)
+tools/devstack/selftest.sh    # every flow once, with curl
+tools/devstack/smoke.sh       # a Production-configured API, black-box checks
+tools/devstack/down.sh
+```
+
+See [`tools/devstack/README.md`](tools/devstack/README.md). CI (`.github/workflows/ci.yml`) runs the build with
+warnings as errors, the dependency audit, the test suites on MariaDB 11.8 and 12.3 and the live stack;
+`.github/workflows/e2e.yml` runs the web and desktop live suites against it (nightly and on `main`).
+
+## Deployment
+
+`deploy/` holds the systemd unit, the Apache vhost and the deploy, verify and Cloudflare-IP scripts; the procedure
+and the host checklist are in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
 ## Architecture
 
 ```

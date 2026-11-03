@@ -62,6 +62,11 @@ When **email delivery is not configured** (no SMTP credentials), `register` and
 nothing (no account/challenge/outbox); `verify-email` remains available so
 already-issued links can still be consumed. `/health` does not reveal capability state.
 
+In the Development and Testing environments only, `Email:HoldInOutbox=true` makes `register`,
+`resend-verification` and `forgot-password` behave as with delivery (202, the message queued in the
+encrypted outbox) while nothing is ever sent — the local live stack reads the token from the outbox
+(`tools/devstack/mail.sh`). Every other environment, Production included, refuses to start with it.
+
 ## `POST /v1/auth/verify-email`
 
 Consumes a verification token and **sets the account password** (chosen by the
