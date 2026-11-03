@@ -157,7 +157,7 @@ jobs:
       - name: Bring the stack up
         run: tools/devstack/up.sh
 
-      - name: Functional selftest (curl, the three client variables only)
+      - name: Functional selftest (curl + the dev authenticator, the three client variables only)
         run: tools/devstack/selftest.sh
 
       - name: Production smoke checks

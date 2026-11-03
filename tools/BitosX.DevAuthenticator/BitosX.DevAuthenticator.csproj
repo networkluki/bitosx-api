@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Development-only software WebAuthn authenticator for the local live stack (tools/devstack/selftest.sh). It is the
+    test suite's SoftwareAuthenticator (compiled from tests/BitosX.Api.Tests/WebAuthn) behind a small command line:
+    it answers the API's creation/request options the way a browser with a platform authenticator would. Never part
+    of the API's publish output; it keeps its private keys in a local state file.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\tests\BitosX.Api.Tests\WebAuthn\SoftwareAuthenticator.cs" Link="SoftwareAuthenticator.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Formats.Cbor" Version="10.0.12" />
+  </ItemGroup>
+
+</Project>
