@@ -205,6 +205,33 @@ public sealed class SessionRevocationTests
         Assert.DoesNotContain(revoked, ids);        // unrevoked only
     }
 
+    [Fact]
+    public async Task List_IsCappedAtTheNewest200_AndReadsUtcTimestamps()
+    {
+        var accountId = await SeedAccountAsync();
+        await using (var c = await _fixture.ConnectionFactory.OpenConnectionAsync())
+        {
+            // 205 sessions, one minute apart; the five oldest must be left out.
+            var rows = Enumerable.Range(0, 205).Select(i => new
+            {
+                id = Guid.NewGuid(), accountId, createdAt = Now.AddMinutes(-205 + i), lastSeen = Now, absolute = Now.AddDays(90),
+            });
+            await c.ExecuteAsync(
+                """
+                INSERT INTO sessions (id, account_id, created_at, last_seen_at, absolute_expires_at, revoked_at, user_agent)
+                VALUES (@id, @accountId, @createdAt, @lastSeen, @absolute, NULL, NULL);
+                """, rows);
+        }
+
+        var list = await Store().ListSessionsAsync(accountId);
+
+        Assert.Equal(SessionListLimits.MaxListedSessions, list.Count);
+        Assert.Equal(Now.AddMinutes(-1), list[0].CreatedAt);            // newest first
+        Assert.Equal(Now.AddMinutes(-200), list[^1].CreatedAt);         // the five oldest are not listed
+        Assert.All(list, r => Assert.Equal(DateTimeKind.Utc, r.CreatedAt.Kind));
+        Assert.All(list, r => Assert.Equal(DateTimeKind.Utc, r.LastSeenAt.Kind));
+    }
+
     // ============================ LIST usability filter (MIN-1) ============================
 
     private async Task<Guid[]> ListIdsAsync(Guid accountId, TimeProvider? clock = null)

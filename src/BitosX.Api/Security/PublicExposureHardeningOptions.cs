@@ -34,6 +34,9 @@ public sealed class PublicExposureHardeningOptions
     /// <summary>Password-confirmed account deletion per account (phase 6): bounds password guessing through a stolen session.</summary>
     public TokenBucketPolicyOptions AccountDeletePerAccount { get; set; } = new() { TokenLimit = 5, TokensPerPeriod = 1, ReplenishmentSeconds = 180 };
 
+    /// <summary>Password change while signed in, per account (phase 8): bounds current-password guessing through a stolen session.</summary>
+    public TokenBucketPolicyOptions PasswordChangePerAccount { get; set; } = new() { TokenLimit = 5, TokensPerPeriod = 1, ReplenishmentSeconds = 180 };
+
     /// <summary>Second sign-in step (TOTP / recovery code) per trusted client IP (phase 7). Each attempt is cheap but guessable; the challenge itself allows 5 tries.</summary>
     public TokenBucketPolicyOptions MfaPerIp { get; set; } = new() { TokenLimit = 10, TokensPerPeriod = 5, ReplenishmentSeconds = 30 };
 
@@ -58,6 +61,7 @@ public sealed class PublicExposureHardeningOptions
         PasswordResetPerIp.Validate($"{SectionName}:PasswordResetPerIp");
         PasswordResetPerEmail.Validate($"{SectionName}:PasswordResetPerEmail");
         AccountDeletePerAccount.Validate($"{SectionName}:AccountDeletePerAccount");
+        PasswordChangePerAccount.Validate($"{SectionName}:PasswordChangePerAccount");
         MfaPerIp.Validate($"{SectionName}:MfaPerIp");
         TotpManagePerAccount.Validate($"{SectionName}:TotpManagePerAccount");
         PartitionState.Validate($"{SectionName}:PartitionState");

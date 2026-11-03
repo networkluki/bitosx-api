@@ -43,6 +43,10 @@ public static class AccountEndpoints
     private static async ValueTask<object?> RejectOversizedBody(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
         => context.HttpContext.Request.ContentLength is > MaxBodyBytes ? PayloadTooLarge() : await next(context);
 
+    private static IResult InvalidNewPassword() => Results.Problem(
+        statusCode: StatusCodes.Status400BadRequest, title: "Invalid request",
+        detail: $"Password must be between {AccountPasswordPolicy.MinLength} and {AccountPasswordPolicy.MaxLength} characters.");
+
     private static IResult SecondFactorUnavailable() => Results.Problem(
         statusCode: StatusCodes.Status503ServiceUnavailable, title: "Service unavailable", detail: "Two-factor authentication is temporarily unavailable.");
 
@@ -124,10 +128,11 @@ public static class AccountEndpoints
             return result == DeleteSessionResult.Succeeded ? Results.NoContent() : SessionNotFound();
         }).WithName("DeleteSession");
 
-        // Permanent deletion of the caller's own account, confirmed with the account password. Removes the
-        // account and, by cascade, its sessions, refresh tokens, challenges, queued mail and the stored
-        // vault envelope. The password is verified with Argon2 outside any lock and re-checked (as the exact
-        // hash) under the account lock by the store. POST (not DELETE) because the confirmation is a body.
+        // Permanent deletion of the caller's own account, confirmed with the account password and — when the
+        // account has TOTP confirmed — a TOTP or recovery code. Removes the account and, by cascade, its sessions,
+        // refresh tokens, challenges, queued mail and the stored vault envelope. The password is verified with
+        // Argon2 outside any lock and re-checked (as the exact hash) under the account lock by the store. POST
+        // (not DELETE) because the confirmation is a body.
         group.MapPost("/delete", async (DeleteAccountRequest request, HttpContext http, IAccountDeletionService service, CancellationToken ct) =>
         {
             if (!TryGetAuthenticatedIds(http.User, out var accountId, out _))
@@ -138,18 +143,57 @@ public static class AccountEndpoints
             DeleteAccountResult result;
             try
             {
-                result = await service.DeleteAsync(new DeleteAccountCommand(accountId, request.Password), ct);
+                result = await service.DeleteAsync(new DeleteAccountCommand(accountId, request.Password, request.Code), ct);
             }
             catch (PasswordHashingCapacityExceededException)
             {
                 return CapacityUnavailable(http);
             }
 
-            return result == DeleteAccountResult.Deleted ? Results.NoContent() : PasswordConfirmationFailed();
+            return result switch
+            {
+                DeleteAccountResult.Deleted => Results.NoContent(),
+                DeleteAccountResult.SecondFactorUnavailable => SecondFactorUnavailable(),
+                _ => PasswordConfirmationFailed(),
+            };
         })
         .AddEndpointFilter(AuthRateLimiting.AccountDeletePerAccountFilter)
         .AddEndpointFilter(RejectOversizedBody)
         .WithName("DeleteAccount");
+
+        // Change the account password while signed in: the current password (and a TOTP or recovery code when
+        // TOTP is confirmed) confirms it. Every other session and its refresh tokens are revoked; the calling
+        // session stays valid. Open password-reset links are invalidated. The vault master password is not
+        // affected (zero-knowledge). Both Argon2 operations run outside any lock.
+        group.MapPost("/password", async (ChangePasswordRequest request, HttpContext http, IPasswordChangeService service, CancellationToken ct) =>
+        {
+            if (!TryGetAuthenticatedIds(http.User, out var accountId, out var sessionId))
+            {
+                return Unauthenticated();
+            }
+
+            ChangePasswordResult result;
+            try
+            {
+                result = await service.ChangeAsync(
+                    new ChangePasswordCommand(accountId, sessionId, request.CurrentPassword, request.NewPassword, request.Code), ct);
+            }
+            catch (PasswordHashingCapacityExceededException)
+            {
+                return CapacityUnavailable(http);
+            }
+
+            return result switch
+            {
+                ChangePasswordResult.Changed => Results.NoContent(),
+                ChangePasswordResult.InvalidNewPassword => InvalidNewPassword(),
+                ChangePasswordResult.SecondFactorUnavailable => SecondFactorUnavailable(),
+                _ => PasswordConfirmationFailed(),
+            };
+        })
+        .AddEndpointFilter(AuthRateLimiting.PasswordChangePerAccountFilter)
+        .AddEndpointFilter(RejectOversizedBody)
+        .WithName("ChangePassword");
 
         MapTotpEndpoints(group);
         return app;

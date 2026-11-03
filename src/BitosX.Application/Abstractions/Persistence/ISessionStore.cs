@@ -167,7 +167,10 @@ public interface ISessionStore
     /// </summary>
     Task<SessionDeleteOutcome> DeleteSessionAsync(Guid accountId, Guid sessionId, CancellationToken cancellationToken = default);
 
-    /// <summary>Lists the account's unrevoked sessions (read-only), ordered deterministically.</summary>
+    /// <summary>
+    /// Lists the account's current usable sessions (read-only), newest first, at most
+    /// <see cref="BitosX.Application.Sessions.SessionListLimits.MaxListedSessions"/> rows.
+    /// </summary>
     Task<IReadOnlyList<SessionListRow>> ListSessionsAsync(Guid accountId, CancellationToken cancellationToken = default);
 }
 

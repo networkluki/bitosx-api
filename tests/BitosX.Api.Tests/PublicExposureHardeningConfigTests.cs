@@ -63,7 +63,14 @@ public sealed class PublicExposureHardeningConfigTests
         Assert.Equal(10, o.TotpManagePerAccount.TokenLimit);
         Assert.Equal(2, o.TotpManagePerAccount.TokensPerPeriod);
         Assert.Equal(60, o.TotpManagePerAccount.ReplenishmentSeconds);
+        Assert.Equal(5, o.PasswordChangePerAccount.TokenLimit);
+        Assert.Equal(1, o.PasswordChangePerAccount.TokensPerPeriod);
+        Assert.Equal(180, o.PasswordChangePerAccount.ReplenishmentSeconds);
     }
+
+    [Fact] public void PasswordChangePerAccount_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasswordChangePerAccount:TokenLimit"] = "0" }));
+    [Fact] public void PasswordChangePerAccount_TokensPerPeriodExceedsLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasswordChangePerAccount:TokensPerPeriod"] = "999" }));
+    [Fact] public void PasswordChangePerAccount_ZeroReplenishment_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasswordChangePerAccount:ReplenishmentSeconds"] = "0" }));
 
     [Fact] public void SyncWrite_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "SyncWritePerAccount:TokenLimit"] = "0" }));
     [Fact] public void PasswordResetPerIp_ZeroTokenLimit_Throws() => Assert.Throws<InvalidOperationException>(() => Add(new() { [P + "PasswordResetPerIp:TokenLimit"] = "0" }));

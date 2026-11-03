@@ -1,5 +1,6 @@
 using BitosX.Application.Abstractions.Persistence;
 using BitosX.Application.Accounts;
+using BitosX.Application.Mfa;
 using BitosX.Application.Security;
 
 namespace BitosX.Application.Tests;
@@ -12,8 +13,9 @@ public sealed class AccountDeletionServiceTests
     private readonly FakeAccountRepository _accounts = new();
     private readonly ConfigurablePasswordHasher _hasher = new();
     private readonly FakeAccountDeletionStore _store = new();
+    private readonly FakeSecondFactor _secondFactor = new();
 
-    private AccountDeletionService Service() => new(_accounts, _hasher, _store);
+    private AccountDeletionService Service() => new(_accounts, _hasher, _store, _secondFactor);
 
     private Account Verified() => new()
     {
@@ -103,10 +105,65 @@ public sealed class AccountDeletionServiceTests
     {
         var account = Verified();
         _accounts.Seed(account);
-        var service = new AccountDeletionService(_accounts, new ThrowingHasher(), _store);
+        var service = new AccountDeletionService(_accounts, new ThrowingHasher(), _store, _secondFactor);
 
         await Assert.ThrowsAsync<PasswordHashingCapacityExceededException>(() => service.DeleteAsync(new DeleteAccountCommand(account.Id, Pw)));
         Assert.Equal(0, _store.Calls);
+    }
+
+    [Fact]
+    public async Task TotpConfirmed_ValidCode_Deletes_AndTheCodeReachesTheCheck()
+    {
+        var account = Verified();
+        _accounts.Seed(account);
+        _secondFactor.Result = SecondFactorCheck.Accepted;
+
+        Assert.Equal(DeleteAccountResult.Deleted, await Service().DeleteAsync(new DeleteAccountCommand(account.Id, Pw, "123456")));
+        Assert.Equal("123456", _secondFactor.LastCode);
+        Assert.Equal(1, _store.Calls);
+    }
+
+    [Fact]
+    public async Task TotpConfirmed_MissingOrWrongCode_IsTheSameGenericFailure_AndDeletesNothing()
+    {
+        var account = Verified();
+        _accounts.Seed(account);
+        _secondFactor.Result = SecondFactorCheck.Rejected;
+
+        Assert.Equal(DeleteAccountResult.InvalidPassword, await Service().DeleteAsync(new DeleteAccountCommand(account.Id, Pw)));
+        Assert.Equal(DeleteAccountResult.InvalidPassword, await Service().DeleteAsync(new DeleteAccountCommand(account.Id, Pw, "000000")));
+        Assert.Equal(0, _store.Calls);
+    }
+
+    [Fact]
+    public async Task TotpConfirmed_ButUnverifiable_FailsClosed()
+    {
+        var account = Verified();
+        _accounts.Seed(account);
+        _secondFactor.Result = SecondFactorCheck.Unavailable;
+
+        Assert.Equal(DeleteAccountResult.SecondFactorUnavailable, await Service().DeleteAsync(new DeleteAccountCommand(account.Id, Pw, "123456")));
+        Assert.Equal(0, _store.Calls);
+    }
+
+    [Fact]
+    public async Task WrongPassword_NeverConsultsTheSecondFactor()
+    {
+        var account = Verified();
+        _accounts.Seed(account);
+        _hasher.VerifyResult = PasswordVerificationResult.Failed;
+        _secondFactor.Result = SecondFactorCheck.Accepted;
+
+        Assert.Equal(DeleteAccountResult.InvalidPassword, await Service().DeleteAsync(new DeleteAccountCommand(account.Id, Pw, "123456")));
+        Assert.Equal(0, _secondFactor.Calls); // a wrong password never uses up a code
+    }
+
+    [Fact]
+    public void Command_ToString_RedactsPasswordAndCode()
+    {
+        var text = new DeleteAccountCommand(Guid.NewGuid(), "secret-password-1", "123456").ToString();
+        Assert.DoesNotContain("secret-password-1", text);
+        Assert.DoesNotContain("123456", text);
     }
 
     private sealed class ThrowingHasher : IAccountPasswordHasher

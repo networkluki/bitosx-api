@@ -352,9 +352,20 @@ public static class AccountsServiceCollectionExtensions
         services.AddScoped<ISessionManagementService, SessionManagementService>();
         services.AddScoped<ISessionAuthenticator, SessionAuthenticator>();
 
-        // Account deletion is an authenticated operation (password-confirmed), so it is composed with Login.
+        // Second-factor confirmation for password-confirmed account operations. Needs only the TOTP store; the
+        // code verifier exists only with the Totp capability (registered by AddBitosxTotp), and without it an
+        // account with TOTP confirmed is refused, never let through on the password alone.
+        services.AddScoped<ISecondFactorConfirmation>(sp =>
+            new SecondFactorConfirmation(sp.GetRequiredService<ITotpStore>(), sp.GetService<MfaCodeVerifier>()));
+
+        // Account deletion is an authenticated operation (password-confirmed, plus the second factor when TOTP
+        // is confirmed), so it is composed with Login.
         services.AddSingleton<IAccountDeletionStore>(_ => new AccountDeletionStore(connectionFactory));
         services.AddScoped<IAccountDeletionService, AccountDeletionService>();
+
+        // Password change while signed in (same confirmation as deletion; revokes every other session).
+        services.AddSingleton<IAccountPasswordStore>(sp => new AccountPasswordStore(connectionFactory, sp.GetRequiredService<TimeProvider>()));
+        services.AddScoped<IPasswordChangeService, PasswordChangeService>();
 
         return services;
     }

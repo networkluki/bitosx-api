@@ -9,12 +9,20 @@ namespace BitosX.Infrastructure.Persistence;
 /// account's row (or proves there is none) and compares the revision under that lock, so two devices
 /// uploading at once cannot both win: one gets <see cref="EnvelopeUpsertOutcome.Conflict"/> and the
 /// current revision, and writes nothing. The store never looks inside the envelope.
+///
+/// Revisions never restart: a delete clears the envelope but keeps the row and its revision as a
+/// tombstone (<c>envelope IS NULL</c>), which reads as "nothing stored". The next upload must name base
+/// revision 0, as for a first upload, and is stored as the tombstone's revision + 1.
 /// </summary>
 public sealed class EnvelopeStore : IEnvelopeStore
 {
     private sealed record MetaRow(Guid AccountId, long Revision, byte[] Fingerprint, int SizeBytes, DateTime CreatedAt, DateTime UpdatedAt);
     private sealed record FullRow(Guid AccountId, long Revision, byte[] Fingerprint, int SizeBytes, DateTime CreatedAt, DateTime UpdatedAt, byte[] Envelope);
-    private sealed record LockRow(long Revision);
+    private sealed class LockRow
+    {
+        public long Revision { get; init; }
+        public bool HasEnvelope { get; init; }
+    }
 
     private readonly BitosxConnectionFactory _connectionFactory;
     private readonly TimeProvider _clock;
@@ -34,7 +42,7 @@ public sealed class EnvelopeStore : IEnvelopeStore
                 """
                 SELECT account_id, revision, fingerprint, size_bytes, created_at, updated_at, envelope
                 FROM vault_blobs
-                WHERE account_id = @AccountId;
+                WHERE account_id = @AccountId AND envelope IS NOT NULL;
                 """, new { AccountId = accountId }, cancellationToken: cancellationToken)).ConfigureAwait(false);
             return row is null ? null : new StoredEnvelope(row.AccountId, row.Revision, row.Fingerprint, row.SizeBytes, row.CreatedAt, row.UpdatedAt, row.Envelope);
         }
@@ -43,7 +51,7 @@ public sealed class EnvelopeStore : IEnvelopeStore
             """
             SELECT account_id, revision, fingerprint, size_bytes, created_at, updated_at
             FROM vault_blobs
-            WHERE account_id = @AccountId;
+            WHERE account_id = @AccountId AND envelope IS NOT NULL;
             """, new { AccountId = accountId }, cancellationToken: cancellationToken)).ConfigureAwait(false);
         return meta is null ? null : new StoredEnvelope(meta.AccountId, meta.Revision, meta.Fingerprint, meta.SizeBytes, meta.CreatedAt, meta.UpdatedAt, null);
     }
@@ -74,18 +82,22 @@ public sealed class EnvelopeStore : IEnvelopeStore
         }
 
         var current = await connection.QuerySingleOrDefaultAsync<LockRow>(new CommandDefinition(
-            "SELECT revision FROM vault_blobs WHERE account_id = @AccountId FOR UPDATE;",
+            "SELECT revision AS Revision, (envelope IS NOT NULL) AS HasEnvelope FROM vault_blobs WHERE account_id = @AccountId FOR UPDATE;",
             new { AccountId = accountId }, tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         var now = _clock.GetUtcNow().UtcDateTime;
-        var currentRevision = current?.Revision ?? 0;
+        // What the client compares against: the stored revision, or 0 when nothing is stored (no row,
+        // or a tombstone left by a delete).
+        var currentRevision = current is { HasEnvelope: true } ? current.Revision : 0;
         if (currentRevision != baseRevision)
         {
             await tx.RollbackAsync(cancellationToken).ConfigureAwait(false);
             return new EnvelopeUpsertResult(EnvelopeUpsertOutcome.Conflict, currentRevision, now);
         }
 
-        var nextRevision = checked(currentRevision + 1);
+        // The next revision continues after the last one ever issued, tombstone included.
+        var lastRevision = current?.Revision ?? 0;
+        var nextRevision = checked(lastRevision + 1);
         int rows;
         if (current is null)
         {
@@ -103,9 +115,9 @@ public sealed class EnvelopeStore : IEnvelopeStore
                 """
                 UPDATE vault_blobs
                 SET revision = @Revision, size_bytes = @SizeBytes, fingerprint = @Fingerprint, envelope = @Envelope, updated_at = @Now
-                WHERE account_id = @AccountId AND revision = @BaseRevision;
+                WHERE account_id = @AccountId AND revision = @LastRevision;
                 """,
-                new { AccountId = accountId, Revision = nextRevision, BaseRevision = baseRevision, SizeBytes = envelope.Length, Fingerprint = fingerprint, Envelope = envelope, Now = now },
+                new { AccountId = accountId, Revision = nextRevision, LastRevision = lastRevision, SizeBytes = envelope.Length, Fingerprint = fingerprint, Envelope = envelope, Now = now },
                 tx, cancellationToken: cancellationToken)).ConfigureAwait(false);
         }
 
@@ -119,12 +131,21 @@ public sealed class EnvelopeStore : IEnvelopeStore
         return new EnvelopeUpsertResult(EnvelopeUpsertOutcome.Stored, nextRevision, now);
     }
 
+    /// <summary>
+    /// Clears the stored envelope and keeps the row as a tombstone that remembers the last revision, so
+    /// revisions never restart. Idempotent: returns whether an envelope was there.
+    /// </summary>
     public async Task<bool> DeleteAsync(Guid accountId, CancellationToken cancellationToken = default)
     {
+        var now = _clock.GetUtcNow().UtcDateTime;
         await using var connection = await _connectionFactory.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
         var rows = await connection.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM vault_blobs WHERE account_id = @AccountId;",
-            new { AccountId = accountId }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            """
+            UPDATE vault_blobs
+            SET envelope = NULL, fingerprint = NULL, size_bytes = 0, updated_at = @Now
+            WHERE account_id = @AccountId AND envelope IS NOT NULL;
+            """,
+            new { AccountId = accountId, Now = now }, cancellationToken: cancellationToken)).ConfigureAwait(false);
         return rows == 1;
     }
 }

@@ -13,29 +13,21 @@ public static class PersistenceServiceCollectionExtensions
     private static int _dapperConfigured;
 
     /// <summary>
-    /// Registers the BitosX persistence services. Connection strings are supplied
-    /// by the caller from a local secret store (never committed).
+    /// Registers the BitosX persistence services for the web host. The connection string is supplied by the
+    /// caller from a local secret store (never committed).
     ///
-    /// The runtime connection uses a DML-only database account; the migrator uses
-    /// a separate schema-management account. They are intentionally distinct so a
-    /// compromise of the runtime credentials cannot alter the schema. The migrator
-    /// is registered only when its connection string is provided.
+    /// The runtime connection uses a DML-only database account. Schema migrations are NOT part of the web
+    /// host: they are applied by the separate <c>migrate</c> command (a <see cref="SqlMigrationRunner"/> over
+    /// the schema-management account), so the web host never holds credentials that could alter the schema.
     /// </summary>
     public static IServiceCollection AddBitosxPersistence(
         this IServiceCollection services,
-        string runtimeConnectionString,
-        string? migratorConnectionString = null)
+        string runtimeConnectionString)
     {
         ConfigureDapper();
 
         services.AddScoped<IAccountRepository>(
             _ => new AccountRepository(new BitosxConnectionFactory(runtimeConnectionString)));
-
-        if (!string.IsNullOrWhiteSpace(migratorConnectionString))
-        {
-            services.AddSingleton<IDatabaseMigrator>(
-                _ => new SqlMigrationRunner(new BitosxConnectionFactory(migratorConnectionString)));
-        }
 
         return services;
     }

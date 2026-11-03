@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using BitosX.Api.Auth;
 using BitosX.Api.Endpoints;
+using BitosX.Api.Hosting;
 using BitosX.Api.Http;
 using BitosX.Api.Security;
 using BitosX.Application.Versioning;
@@ -15,6 +16,13 @@ using BitosX.Infrastructure.Versioning;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Logging;
+
+// `dotnet BitosX.Api.dll migrate`: apply pending schema migrations with ConnectionStrings:BitosxMigrator and
+// exit. The web host below is never built or started in that mode.
+if (MigrateCommand.IsRequested(args))
+{
+    return await MigrateCommand.RunAsync(args, Console.Out, Console.Error);
+}
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -67,15 +75,26 @@ builder.WebHost.ConfigureKestrel(options =>
     options.AddServerHeader = false;
 });
 
-// ---- CORS for the browser client(s): the web account app at https://vault.bitosx.se ----
-// Bound + validated fail-closed at startup (exact https origins only, no credentials).
-// With an empty Security:Cors:AllowedOrigins list, no CORS middleware is registered and no
-// CORS header is emitted, exactly as before. See BrowserCorsOptions for the policy and its rationale.
+// ---- CORS for the browser client(s): the web account app at https://vault.bitosx.se, and the product
+// page at https://bitosx.se for GET /health and GET /version only ----
+// Bound + validated fail-closed at startup (exact https origins only, no credentials). With both
+// Security:Cors:AllowedOrigins and Security:Cors:StatusPageOrigins empty, no CORS middleware is registered
+// and no CORS header is emitted. See BrowserCorsOptions for the policies and their rationale.
 var corsOptions = BrowserCorsOptions.Bind(builder.Configuration);
 builder.Services.AddSingleton(corsOptions);
-if (corsOptions.Enabled)
+if (corsOptions.AnyEnabled)
 {
-    builder.Services.AddCors(options => options.AddPolicy(BrowserCorsOptions.PolicyName, corsOptions.BuildPolicy()));
+    builder.Services.AddCors(options =>
+    {
+        if (corsOptions.Enabled)
+        {
+            // The browser-client policy is the default: every endpoint without its own CORS metadata uses it.
+            options.AddPolicy(BrowserCorsOptions.PolicyName, corsOptions.BuildPolicy());
+            options.DefaultPolicyName = BrowserCorsOptions.PolicyName;
+        }
+
+        options.AddPolicy(BrowserCorsOptions.StatusPolicyName, corsOptions.BuildStatusPolicy());
+    });
 }
 
 // ---- Composition root ----
@@ -99,8 +118,9 @@ ProductionExposureValidation.Validate(builder.Environment, builder.Configuration
 
 if (capabilities.AccountCoreEnabled)
 {
-    var bitosxMigratorConnectionString = builder.Configuration.GetConnectionString("BitosxMigrator");
-    builder.Services.AddBitosxPersistence(bitosxConnectionString!, bitosxMigratorConnectionString);
+    // The web host runs with the DML-only runtime account; schema changes are applied out of band by the
+    // `migrate` command with the separate migrator account, which the web host never reads.
+    builder.Services.AddBitosxPersistence(bitosxConnectionString!);
     builder.Services.AddBitosxAccountCore(builder.Configuration);
 
     // Phase 2D.1: bind + validate public-exposure hardening (fail-closed) and register the auth rate
@@ -167,9 +187,11 @@ app.UseMiddleware<CorrelationIdMiddleware>();
 // CORS runs before authentication so a browser preflight (OPTIONS, no credentials) is answered
 // without ever reaching an endpoint, its rate limiter or the JWT handler. Registered only when an
 // origin is configured; a disallowed Origin simply gets no CORS headers and the browser blocks the read.
-if (corsOptions.Enabled)
+// The default policy (browser clients) applies to every endpoint; /health and /version carry the
+// status policy as endpoint metadata.
+if (corsOptions.AnyEnabled)
 {
-    app.UseCors(BrowserCorsOptions.PolicyName);
+    app.UseCors();
 }
 
 // Per-endpoint request-body limit (the envelope upload needs more than Kestrel's 64 KB default).
@@ -190,8 +212,8 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-// Unversioned infrastructure endpoints (/health, /version).
-app.MapInfrastructureEndpoints();
+// Unversioned infrastructure endpoints (/health, /version), readable cross-origin by the status page.
+app.MapInfrastructureEndpoints(corsOptions.StatusPolicyEnabled ? BrowserCorsOptions.StatusPolicyName : null);
 
 // Future versioned business API surface (currently empty).
 app.MapApiV1();
@@ -228,6 +250,7 @@ foreach (var mapEndpoints in app.Services.GetServices<Action<IEndpointRouteBuild
 }
 
 app.Run();
+return 0;
 
 // Exposed so the integration test project can bootstrap the app with
 // WebApplicationFactory<Program>.
