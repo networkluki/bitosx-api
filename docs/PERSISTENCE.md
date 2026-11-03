@@ -1,7 +1,7 @@
 # BitosX API — Persistence
 
-Schema (migrations 0001–0008) and data access for accounts, email verification and password reset,
-sessions and refresh tokens, TOTP, the email outbox and the encrypted-envelope sync. Phone/SMS
+Schema (migrations 0001–0009) and data access for accounts, email verification and password reset,
+sessions and refresh tokens, TOTP, passkeys (WebAuthn), the email outbox and the encrypted-envelope sync. Phone/SMS
 tables exist but no SMS behavior is implemented.
 
 ## Engine and data-access stack
@@ -125,6 +125,33 @@ account row, then the envelope row, and writes only if the client's base revisio
   globally; indexes for batched retention/housekeeping deletes: `email_outbox(created_at)`,
   `email_verification_challenges(expires_at)`, `mfa_challenges(expires_at)`, `sessions(revoked_at)`,
   `sessions(absolute_expires_at)`, `sessions(last_seen_at)`.
+
+## Migration 0009 (passkeys, phase 10)
+
+- `accounts.webauthn_user_handle BINARY(32) NULL`, `UNIQUE`: the account's WebAuthn user handle (`user.id`),
+  32 random bytes assigned at the first passkey registration-options call by a conditional UPDATE
+  (`… WHERE webauthn_user_handle IS NULL`, so concurrent first calls agree) and kept for the account's
+  lifetime. Never the account id or the email.
+- `webauthn_credentials`: `id CHAR(36)` PK, `account_id CHAR(36)` → `accounts(id) ON DELETE CASCADE`
+  (indexed), `credential_id VARBINARY(1023)` **UNIQUE** across all accounts (WebAuthn's maximum length),
+  `public_key VARBINARY(2048)` (the COSE key; RSA-4096 fits), `sign_count BIGINT UNSIGNED`, `user_handle
+  BINARY(32)` (the account's handle at registration), `name VARCHAR(64)` (utf8mb4, the schema collation),
+  `aaguid BINARY(16)` (RFC 4122 byte order), `backup_eligible`/`backed_up TINYINT(1)`, `transports
+  VARCHAR(255) NULL` (comma-separated hints), `created_at DATETIME(6)`, `last_used_at DATETIME(6) NULL`.
+  Timestamps are truncated to the microsecond before they are written, so the API's answers equal later reads.
+- `webauthn_challenges`: `id CHAR(36)` PK, `purpose VARCHAR(16)` (`CHECK` register/mfa/passwordless),
+  `handle_hash BINARY(32) NULL UNIQUE` (SHA-256 of the registration/assertion id), `account_id CHAR(36) NULL`
+  → accounts (cascade), `mfa_challenge_id CHAR(36) NULL UNIQUE` → `mfa_challenges(id)` (cascade; one passkey
+  ceremony per MFA challenge, replaced with `INSERT … ON DUPLICATE KEY UPDATE`), `challenge VARBINARY(64)`
+  (kept raw: the WebAuthn library verifies against the original bytes; it is not a secret),
+  `created_at`/`expires_at`/`consumed_at DATETIME(6)`, indexes on `account_id` and `expires_at`. Claimed once
+  by a conditional UPDATE (`consumed_at IS NULL AND expires_at > now`).
+- Lock order of a passkey insert: `accounts` row → `account_totp` row (both `FOR UPDATE`, READ COMMITTED),
+  then the count and the insert; TOTP disable takes the `account_totp` lock and counts passkeys with a
+  locking read. Signature counters are updated by compare-and-set (`WHERE sign_count = <verified value>`).
+- Housekeeping deletes expired `webauthn_challenges` rows at once (no retention window) in bounded batches
+  over `expires_at`. Account deletion cascades credentials and ceremonies; a password reset changes neither.
+- The runtime (DML-only) account needs no new grant: the tables live in `bitosx.*`.
 
 All timestamps are UTC `DATETIME(6)`; every connection forces MySqlConnector's `DateTimeKind=Utc`, so
 values read back are `DateTimeKind.Utc`.
