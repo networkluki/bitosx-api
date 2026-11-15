@@ -117,6 +117,29 @@ Phase 10 adds migration 0009 (passkeys): one nullable unique column on `accounts
 and two new tables (`webauthn_credentials`, `webauthn_challenges`). The `ALTER TABLE accounts` is online on
 MariaDB 11.8; no grant changes (the runtime account's DML on `bitosx.*` covers the new tables).
 
+## The .NET runtime
+
+The API is published framework-dependent: it runs on the host's .NET and ASP.NET Core 10.0 runtimes, and takes the
+newest 10.0.x patch installed. Libraries that ship inside those runtimes are therefore patched by updating the host,
+not by the release archive — a package reference in this repository does not replace them (verified 2026-11-15: the
+running API loaded `System.Formats.Cbor` from `/usr/lib/dotnet/shared/Microsoft.AspNetCore.App/<version>/`, although
+the build references the package 10.0.15).
+
+`deploy.sh` refuses to deploy unless both `Microsoft.NETCore.App` and `Microsoft.AspNetCore.App` are installed at
+**10.0.15 or later**. 10.0.15 (released 2026-11-10) fixes, among others, CVE-2026-118747
+([GHSA-vmv3-wvjp-wqpj](https://github.com/advisories/GHSA-vmv3-wvjp-wqpj)): CBOR map keys chosen to collide make
+`System.Formats.Cbor` spend excessive time on its duplicate-key check, and the API parses CBOR from anyone who
+registers a passkey. 10.0.14 and 10.0.15 also fix several ASP.NET Core vulnerabilities
+([release notes](https://github.com/dotnet/core/blob/main/release-notes/10.0/10.0.15/10.0.15.md)).
+
+```bash
+dotnet --list-runtimes     # expect Microsoft.AspNetCore.App 10.0.15 (or later) and Microsoft.NETCore.App 10.0.15 (or later)
+```
+
+Update the runtime with the distribution's .NET packages (or Microsoft's package feed) and restart the service: the
+running process keeps the runtime it started with. When a later .NET security release matters, raise
+`min_runtime_patch` in `deploy/scripts/deploy.sh` and the version above together.
+
 ## Configuration added in phase 10
 
 | Key | Default | Notes |
