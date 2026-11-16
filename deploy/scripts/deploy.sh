@@ -73,6 +73,25 @@ if [[ "${dry_run}" == "0" && "${EUID}" -ne 0 ]]; then
     die "run as root (or use --dry-run)"
 fi
 
+# The API is framework-dependent: it runs on this host's .NET and ASP.NET Core 10.0 runtimes, on the newest 10.0.x
+# patch installed (the default roll-forward). A patch below the floor has published vulnerabilities in code the API
+# runs, so the deploy refuses to go on. 10.0.15 (2026-11-10) fixes, among others, CVE-2026-118747: System.Formats.Cbor,
+# which ships in the ASP.NET Core runtime and reads the attestation of every passkey registration. Raise the floor
+# here when a later .NET security release matters (docs/DEPLOYMENT.md, "The .NET runtime").
+min_runtime_patch=15
+runtimes="$("${dotnet_cmd}" --list-runtimes)" || die "'${dotnet_cmd} --list-runtimes' failed"
+for framework in Microsoft.NETCore.App Microsoft.AspNetCore.App; do
+    newest="$(awk -v fw="${framework}" '
+        BEGIN { max = -1 }
+        $1 == fw && $2 ~ /^10\.0\.[0-9]+$/ { split($2, v, "."); if (v[3] + 0 > max) max = v[3] + 0 }
+        END { print max }' <<<"${runtimes}")"
+    [[ "${newest}" -ge 0 ]] || die "${framework} 10.0 is not installed (see '${dotnet_cmd} --list-runtimes')"
+    if (( newest < min_runtime_patch )); then
+        die "${framework} 10.0.${newest} is the newest installed; 10.0.${min_runtime_patch} or later is required (security fixes) — update the .NET 10 runtime first"
+    fi
+    log "${framework} 10.0.${newest} (floor 10.0.${min_runtime_patch})"
+done
+
 [[ -f "${archive}" && -r "${archive}" ]] || die "release archive '${archive}' is not a readable file"
 archive_listing="$(tar -tzf "${archive}")" || die "'${archive}' is not a readable .tar.gz"
 while IFS= read -r entry; do

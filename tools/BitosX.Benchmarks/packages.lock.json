@@ -262,8 +262,8 @@
       },
       "System.Formats.Cbor": {
         "type": "Transitive",
-        "resolved": "9.0.0",
-        "contentHash": "v8LmGrvD0thxFBn5/SaMc5Y0AecfOeoKlAcek1X0fIta8Eb0+fZA3kGelUNE9HhOAe1J1h/tDKjKxh88DWBMjA=="
+        "resolved": "10.0.15",
+        "contentHash": "8EBB814RXFnm/Klsuil8A6r+n6zvz4L/rQ1ROamxDZDt8lIjUl0tbSGlsYzea1jr/4V3Q6TNQbWfU/C8tjwPDQ=="
       },
       "System.Security.Cryptography.Pkcs": {
         "type": "Transitive",
@@ -299,6 +299,7 @@
           "Microsoft.Extensions.Logging.Abstractions": "[10.0.12, )",
           "Microsoft.IdentityModel.JsonWebTokens": "[8.22.0, )",
           "MySqlConnector": "[2.6.2, )",
+          "System.Formats.Cbor": "[10.0.15, )",
           "System.Threading.RateLimiting": "[10.0.0, )"
         }
       }
